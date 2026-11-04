@@ -101,6 +101,12 @@ CONFIG_HEADER='# gstack configuration — edit freely, changes take effect on ne
 #                           #           (for power users who know the terms)
 #                           # Unknown values default to "default" with a warning.
 #                           # See docs/designs/PLAN_TUNING_V1.md for rationale.
+# outside_provider: codex   # codex  = /review, /ship, /autoplan outside reviews use Codex
+#                           # gemini = they use Gemini through bin/gstack-gemini
+#                           #          (Antigravity app or an API key); applies on the next ./setup
+# gemini_transport: antigravity  # antigravity = an agent in your running Antigravity app (your Google plan)
+#                           # api = the Gemini API with a key (gstack-gemini setup)
+# gemini_model: flash       # flash, argon, or a gemini-... model ID (GSTACK_GEMINI_MODEL overrides)
 # plan_mode_preamble: on    # on  = every skill carries the plan-mode preamble
 #                           # off = rendered skills omit the "Plan Mode Safe
 #                           #       Operations" and "Skill Invocation During
@@ -329,6 +335,9 @@ lookup_default() {
     update_channel) echo "auto" ;; # auto | stable | main — bin/gstack-update-channel.sh resolves auto (docs/releases.md)
     skill_prefix) echo "false" ;;
     explain_level) echo "default" ;;
+    outside_provider) echo "codex" ;; # codex | gemini — gemini re-renders Claude skills on the next ./setup
+    gemini_transport) echo "antigravity" ;; # antigravity | api — lib/gemini-review.ts configuredTransport
+    gemini_model) echo "flash" ;; # flash | argon | gemini-... — lib/gemini-review.ts DEFAULT_GEMINI_MODEL
     plan_mode_preamble) echo "on" ;; # on | off — off drops the plan-mode preamble on the next ./setup (#3168)
     claude_loadout) echo "full" ;; # a modules/loadouts.json name — written by ./setup --loadout (docs/loadouts.md)
     codex_reviews) echo "enabled" ;;
@@ -813,6 +822,18 @@ $_gstack_legacy_root"
       echo "Warning: claude_loadout must be a loadout name such as lite or full. Using full." >&2
       VALUE="full"
     fi
+    if [ "$KEY" = "outside_provider" ] && [ "$VALUE" != "codex" ] && [ "$VALUE" != "gemini" ]; then
+      echo "Warning: outside_provider '$VALUE' not recognized. Valid values: codex, gemini. Using codex." >&2
+      VALUE="codex"
+    fi
+    if [ "$KEY" = "gemini_transport" ] && [ "$VALUE" != "antigravity" ] && [ "$VALUE" != "api" ]; then
+      echo "Warning: gemini_transport '$VALUE' not recognized. Valid values: antigravity, api. Using antigravity." >&2
+      VALUE="antigravity"
+    fi
+    if [ "$KEY" = "gemini_model" ] && ! printf '%s' "$VALUE" | grep -Eq '^(flash|argon|gemini-[a-z0-9.-]+)$'; then
+      echo "Warning: gemini_model '$VALUE' is not flash, argon or a gemini-... model ID. Using flash." >&2
+      VALUE="flash"
+    fi
     if [ "$KEY" = "plan_mode_preamble" ] && [ "$VALUE" != "on" ] && [ "$VALUE" != "off" ]; then
       echo "Warning: plan_mode_preamble '$VALUE' not recognized. Valid values: on, off. Using on." >&2
       VALUE="on"
@@ -1107,8 +1128,8 @@ $_gstack_legacy_root"
     fi
     # Installed skills are rendered by ./setup, so the preamble choice lands
     # on its next run (every registered host).
-    if [ "$KEY" = "plan_mode_preamble" ] && [ -z "${GSTACK_SETUP_RUNNING:-}" ]; then
-      printf 'gstack-config: plan_mode_preamble=%s applies on the next ./setup run. Apply now: cd %q && ./setup --refresh-registered\n' "$VALUE" "$(cd "$(dirname "$0")/.." && pwd)"
+    if { [ "$KEY" = "plan_mode_preamble" ] || [ "$KEY" = "outside_provider" ]; } && [ -z "${GSTACK_SETUP_RUNNING:-}" ]; then
+      printf 'gstack-config: %s=%s applies on the next ./setup run. Apply now: cd %q && ./setup --refresh-registered\n' "$KEY" "$VALUE" "$(cd "$(dirname "$0")/.." && pwd)"
     fi
     ;;
   unset)
@@ -1134,7 +1155,7 @@ $_gstack_legacy_root"
     echo "# ─── Active values (including defaults for unset keys) ───"
     report_root_disagreement
     for KEY in proactive routing_declined telemetry auto_upgrade update_check update_channel \
-               skill_prefix explain_level plan_mode_preamble claude_loadout \
+               skill_prefix explain_level plan_mode_preamble claude_loadout outside_provider gemini_transport gemini_model \
                codex_reviews autoplan_shadow autoplan_shadow_model gstack_contributor skip_eng_review workspace_root \
                artifacts_sync_mode artifacts_sync_mode_prompted artifacts_sync_removals plan_tune_hooks \
                timeline_stop_hook design_detector design_detector_install_prompted memorable_recall \
@@ -1160,7 +1181,7 @@ $_gstack_legacy_root"
   defaults)
     echo "# gstack-config defaults"
     for KEY in proactive routing_declined telemetry auto_upgrade update_check update_channel \
-               skill_prefix explain_level plan_mode_preamble claude_loadout \
+               skill_prefix explain_level plan_mode_preamble claude_loadout outside_provider gemini_transport gemini_model \
                codex_reviews autoplan_shadow autoplan_shadow_model gstack_contributor skip_eng_review workspace_root \
                artifacts_sync_mode artifacts_sync_mode_prompted artifacts_sync_removals plan_tune_hooks \
                timeline_stop_hook design_detector design_detector_install_prompted memorable_recall \
@@ -1195,6 +1216,7 @@ $_gstack_legacy_root"
     _PLAN_MODE_ARG=""
     [ "$("$0" get plan_mode_preamble 2>/dev/null || true)" != off ] || _PLAN_MODE_ARG="--plan-mode=off"
     gstack_claude_loadout_arg "$0"
+    gstack_claude_outside_arg "$0"
     DETECT_BIN="$SCRIPT_DIR/gstack-gbrain-detect"
     DETECTION_FILE="$STATE_DIR/gbrain-detection.json"
     mkdir -p "$STATE_DIR"
@@ -1263,7 +1285,7 @@ $_gstack_legacy_root"
           gstack_claude_overlay "$INSTALL_DIR" "$0"
           RENDER_TMP="$RENDER_DIR.tmp.$$"
           rm -rf "$RENDER_TMP"
-          if ( cd "$INSTALL_DIR" && bun run gen:skill-docs:user --host claude --out-dir "$RENDER_TMP" --link-root "$RENDER_DIR" --model "$_GSTACK_OVERLAY" ${_PLAN_MODE_ARG:+"$_PLAN_MODE_ARG"} ${_LOADOUT_ARG:+"$_LOADOUT_ARG"} >/dev/null 2>&1 ); then
+          if ( cd "$INSTALL_DIR" && bun run gen:skill-docs:user --host claude --out-dir "$RENDER_TMP" --link-root "$RENDER_DIR" --model "$_GSTACK_OVERLAY" ${_PLAN_MODE_ARG:+"$_PLAN_MODE_ARG"} ${_LOADOUT_ARG:+"$_LOADOUT_ARG"} ${_OUTSIDE_ARG:+"$_OUTSIDE_ARG"} >/dev/null 2>&1 ); then
             gstack_render_lock "$RENDER_DIR"
             _swap_in_render "$RENDER_DIR" "$RENDER_TMP"
             gstack_render_unlock "$RENDER_DIR"
@@ -1289,7 +1311,7 @@ $_gstack_legacy_root"
         # brain blocks, so removing gbrain keeps the chosen overlay.
         INSTALL_DIR="$HOME/.claude/skills/gstack"
         RENDER_DIR="${GSTACK_USER_RENDER_DIR:-$STATE_DIR/render/claude}"
-        if { [ -d "$RENDER_DIR" ] || "$0" has claude_overlay_model || [ -n "$_PLAN_MODE_ARG" ] || [ -n "$_LOADOUT_ARG" ]; } \
+        if { [ -d "$RENDER_DIR" ] || "$0" has claude_overlay_model || [ -n "$_PLAN_MODE_ARG" ] || [ -n "$_LOADOUT_ARG" ] || [ -n "$_OUTSIDE_ARG" ]; } \
           && [ -d "$INSTALL_DIR" ] && [ ! -L "$INSTALL_DIR" ] && [ -f "$INSTALL_DIR/VERSION" ] && [ -f "$INSTALL_DIR/package.json" ]; then
           if ! command -v bun >/dev/null 2>&1; then
             echo "Skip: bun not on PATH — the Claude render at $RENDER_DIR was not refreshed. Install bun, then re-run 'gstack-config gbrain-refresh'."
