@@ -22,6 +22,8 @@ cd "$DIR" || fail "no checkout at $DIR"
 # setup rewrites it after the merge, so restore it rather than treating it as local work.
 git diff --quiet -- . ':(exclude)SKILL.md' && git diff --cached --quiet || fail "checkout has uncommitted changes to tracked files; not touching it"
 git checkout -q -- SKILL.md
+# Every exit (up to date, rolled back or merged) re-renders the router for this install's settings.
+trap './bin/gstack-relink >>"$LOG" 2>&1 || say "relink failed; run ./setup in $DIR"' EXIT
 git remote get-url upstream >/dev/null 2>&1 || git remote add upstream https://github.com/garrytan/gstack.git
 git fetch -q origin main && git fetch -q upstream main || fail "fetch failed (network or auth)"
 
