@@ -27,7 +27,7 @@ git merge -q --ff-only origin/main || fail "local main diverged from origin/main
 if git merge-base --is-ancestor upstream/main HEAD; then say "up to date with upstream ($(git rev-parse --short upstream/main))"; exit 0; fi
 
 GOOD=$(git rev-parse HEAD)
-if ! git -c user.name="gstack fork sync" -c user.email="swjacobsonjr@gmail.com" merge -q --no-edit -m "Merge upstream garrytan/gstack main [skip ci]" upstream/main; then
+if ! git -c user.name="gstack fork sync" merge -q --no-edit -m "Merge upstream garrytan/gstack main [skip ci]" upstream/main; then
   git merge --abort 2>/dev/null
   fail "merge conflict with upstream $(git rev-parse --short upstream/main); install stays at $(git rev-parse --short "$GOOD"). Resolve in a clone: git merge upstream/main"
 fi
