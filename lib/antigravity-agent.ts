@@ -108,6 +108,8 @@ export function agentPrompt(requestFile: string, outFile: string, cwd: string): 
     'Everything you need, including the code or diff under review, is in that file. Review by reading and reasoning only.',
     `Do not run any terminal command, script, test, build or git command, and do not start other agents or conversations. You may read files in ${cwd} for context, but never modify, create, delete, stage or commit anything there.`,
     'Answer the review request exactly as it asks, in its required format, and finish promptly.',
+    // gstack reads a clean claim followed by commentary as unverified (lib/outside-review-result.ts), as a live Argon review showed.
+    'If you find no defects, write the line NO_FINDINGS by itself instead of describing what the code does well, then any line the request requires (such as Recommendation: ...).',
     `Write your complete answer, and nothing else, to this file: ${outFile}`,
     `When that file is fully written, create the empty file ${outFile}.done`,
     'Those two files are the only files you may create.',
