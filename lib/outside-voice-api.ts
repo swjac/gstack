@@ -1,12 +1,12 @@
 /**
  * outside-voice-api — the `api` runner's transport (plan B3): one direct
- * model call with OPENAI_API_KEY or ANTHROPIC_API_KEY, chosen by the model's
- * family. It is a supplied-input review: the model sees the prompt bytes and
+ * model call with OPENAI_API_KEY, ANTHROPIC_API_KEY or GEMINI_API_KEY, chosen
+ * by the model's family. It is a supplied-input review: the model sees the prompt bytes and
  * nothing else (no repository, no tools), and the runner labels the record so
  * it is never silently equal to a repo-reading review. Every send writes an
  * egress receipt first (lib/egress-receipt.ts). Base URLs honor the providers'
- * own environment variables (OPENAI_BASE_URL, ANTHROPIC_BASE_URL) so a test
- * can point them at a local server.
+ * own environment variables (OPENAI_BASE_URL, ANTHROPIC_BASE_URL,
+ * GEMINI_BASE_URL) so a test can point them at a local server.
  */
 import { sha256Hex, writeReceipt } from './egress-receipt';
 import { modelFamily, type ModelFamily } from './outside-voice-runner';
@@ -15,19 +15,21 @@ import { modelFamily, type ModelFamily } from './outside-voice-runner';
 export interface ApiReceipt { sink: string; consent: string; payloadClass?: string }
 export interface ApiCallRequest { model: string; prompt: string; timeoutMs: number; env?: Record<string, string | undefined>; signal?: AbortSignal; maxTokens?: number; receipt?: ApiReceipt }
 export interface ApiUsage { input_tokens?: number; output_tokens?: number }
-/** `truncated`: the provider stopped at the output token limit (Anthropic `max_tokens`, OpenAI `length`), so the text is cut off; `stop_reason`: the provider's stop or finish reason when it sent one. */
-export interface ApiCallResult { text: string; model: string; usage: ApiUsage; provider: 'openai' | 'anthropic'; status: number; truncated: boolean; stop_reason?: string }
+export type ApiProvider = 'openai' | 'anthropic' | 'google';
+/** `truncated`: the provider stopped at the output token limit (Anthropic `max_tokens`, OpenAI `length`, Google `MAX_TOKENS`), so the text is cut off; `stop_reason`: the provider's stop or finish reason when it sent one. */
+export interface ApiCallResult { text: string; model: string; usage: ApiUsage; provider: ApiProvider; status: number; truncated: boolean; stop_reason?: string }
 
 /** Anthropic requires max_tokens; a full review needs more than 8192. `run` sends this to OpenAI too, where reasoning tokens count toward it. */
 export const DEFAULT_MAX_TOKENS = 16_384;
 /** The api runner's default time limit: five minutes, or about 40 ms per output token the call may write. */
 export const apiTimeoutMs = (maxTokens?: number): number => Math.max(300_000, (maxTokens ?? DEFAULT_MAX_TOKENS) * 40);
 
-export const API_FAMILIES: readonly ModelFamily[] = ['openai', 'anthropic'];
+export const API_FAMILIES: readonly ModelFamily[] = ['openai', 'anthropic', 'google'];
 
-export function apiKeyFor(family: ModelFamily, env: Record<string, string | undefined> = process.env): { key: string; provider: 'openai' | 'anthropic' } | undefined {
+export function apiKeyFor(family: ModelFamily, env: Record<string, string | undefined> = process.env): { key: string; provider: ApiProvider } | undefined {
   if (family === 'openai' && env.OPENAI_API_KEY) return { key: env.OPENAI_API_KEY, provider: 'openai' };
   if (family === 'anthropic' && env.ANTHROPIC_API_KEY) return { key: env.ANTHROPIC_API_KEY, provider: 'anthropic' };
+  if (family === 'google' && env.GEMINI_API_KEY) return { key: env.GEMINI_API_KEY, provider: 'google' };
   return undefined;
 }
 
@@ -63,7 +65,7 @@ export async function callModel(req: ApiCallRequest): Promise<ApiCallResult> {
   const env = req.env ?? process.env;
   const family = modelFamily(req.model);
   const auth = apiKeyFor(family, env);
-  if (!auth) throw new Error(`no API key for model family ${family} (set ${family === 'anthropic' ? 'ANTHROPIC_API_KEY' : family === 'openai' ? 'OPENAI_API_KEY' : 'OPENAI_API_KEY or ANTHROPIC_API_KEY and name a model from that family'})`);
+  if (!auth) throw new Error(`no API key for model family ${family} (set ${family === 'anthropic' ? 'ANTHROPIC_API_KEY' : family === 'openai' ? 'OPENAI_API_KEY' : family === 'google' ? 'GEMINI_API_KEY' : 'OPENAI_API_KEY, ANTHROPIC_API_KEY or GEMINI_API_KEY and name a model from that family'})`);
   const model = req.model.includes('/') ? req.model.slice(req.model.indexOf('/') + 1) : req.model;
   if (auth.provider === 'anthropic') {
     const base = (env.ANTHROPIC_BASE_URL ?? 'https://api.anthropic.com').replace(/\/$/, '');
@@ -73,6 +75,17 @@ export async function callModel(req: ApiCallRequest): Promise<ApiCallResult> {
     const text = Array.isArray(json?.content) ? json.content.filter((c: any) => c?.type === 'text').map((c: any) => c.text).join('\n') : '';
     const stop = typeof json?.stop_reason === 'string' ? json.stop_reason : undefined;
     return { text, model: typeof json?.model === 'string' ? json.model : model, usage: { input_tokens: json?.usage?.input_tokens, output_tokens: json?.usage?.output_tokens }, provider: 'anthropic', status, truncated: stop === 'max_tokens', ...(stop ? { stop_reason: stop } : {}) };
+  }
+  if (auth.provider === 'google') {
+    const base = (env.GEMINI_BASE_URL ?? 'https://generativelanguage.googleapis.com/v1beta').replace(/\/$/, '');
+    const body = JSON.stringify({ contents: [{ role: 'user', parts: [{ text: req.prompt }] }], ...(req.maxTokens ? { generationConfig: { maxOutputTokens: req.maxTokens } } : {}) });
+    const { status, json } = await post(`${base}/models/${encodeURIComponent(model)}:generateContent`, { 'x-goog-api-key': auth.key }, body, req, 'gemini');
+    if (status < 200 || status >= 300) throw new Error(`google ${status}: ${json?.error?.message ?? json?.raw ?? JSON.stringify(json)}`);
+    const candidate = json?.candidates?.[0];
+    // Thought summaries are not the answer; only the visible parts are.
+    const text = Array.isArray(candidate?.content?.parts) ? candidate.content.parts.filter((p: any) => !p?.thought && typeof p?.text === 'string').map((p: any) => p.text).join('') : '';
+    const finish = typeof candidate?.finishReason === 'string' ? candidate.finishReason : typeof json?.promptFeedback?.blockReason === 'string' ? json.promptFeedback.blockReason : undefined;
+    return { text, model: typeof json?.modelVersion === 'string' ? json.modelVersion : model, usage: { input_tokens: json?.usageMetadata?.promptTokenCount, output_tokens: json?.usageMetadata?.candidatesTokenCount }, provider: 'google', status, truncated: finish === 'MAX_TOKENS', ...(finish ? { stop_reason: finish } : {}) };
   }
   const base = (env.OPENAI_BASE_URL ?? 'https://api.openai.com/v1').replace(/\/$/, '');
   const body = JSON.stringify({ model, messages: [{ role: 'user', content: req.prompt }], ...(req.maxTokens ? { max_completion_tokens: req.maxTokens } : {}) });
