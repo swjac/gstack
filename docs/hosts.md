@@ -175,6 +175,13 @@ load only in trusted folders (`/trust`).
 
 Outside reviews require the selected CLI to be installed and authenticated: Claude Code when using gstack in Codex, or Codex on other harnesses. External harnesses discover these commands as `/gstack-claude-code` and `/gstack-codex`; each harness omits its own wrapper. Explicit provider requests keep that provider. The existing `codex_reviews` setting controls automatic outside reviews where supported, regardless of the provider selected.
 
+**Gemini instead of Codex (Claude Code).** `gstack-config set outside_provider gemini`, then `./setup`, re-renders the Claude skills into the untracked render dir so `/review`, `/ship`, `/autoplan`, the plan reviews and the design voices send their outside review to Gemini through `bin/gstack-gemini`; the committed skills keep Codex. The parent always sends the prompt plus the diff it captured. `gemini_transport` picks where it goes, with no automatic fallback between the two:
+
+- `antigravity` (default): an agent in your running Antigravity app, on your Google plan, with no API key or billing. gstack starts it through the app's local `agentapi`, tells it to review read-only without running anything, and reads its answer from a file. The repository is fingerprinted before and after; an agent that changed it fails the review (`repo-modified`). The app must be open; `gstack-gemini --probe` checks.
+- `api`: the Gemini API with a key stored by `gstack-gemini setup` (`~/.gstack/gemini.json`, which the design binary also reads; `GEMINI_API_KEY` works too). Free-tier keys may let Google use what you send.
+
+`gemini_model` is `flash` (default; `gemini-3.8-flash-low` in Antigravity, since its plain flash tier can outlast a review gate), `argon` (`gemini-4-argon-medium` in Antigravity), or any `gemini-...` ID such as `gemini-4-argon-high`; `GSTACK_GEMINI_MODEL` overrides one run. `codex_reviews` still gates every send, each send writes an egress receipt (`outside-voice-antigravity` or `outside-voice-gemini`), and `/codex` stays available for explicit Codex requests (`gstack-config set disabled_skills codex` hides it). `gstack-config set outside_provider codex` and `./setup` return to Codex.
+
 `/claude` has been renamed to `/claude-code`. Re-run `./setup --host <name>` to migrate managed installations, including other harnesses sharing the checkout. Setup preserves the previous installation if replacement generation or installation fails and prints repair instructions.
 
 ## Instruction-only agents
