@@ -18,7 +18,10 @@ fail() { say "FAILED: $*"; exit 1; }
 
 cd "$DIR" || fail "no checkout at $DIR"
 [ "$(git branch --show-current)" = main ] || fail "checkout is not on main"
-git diff --quiet && git diff --cached --quiet || fail "checkout has uncommitted changes to tracked files; not touching it"
+# The root SKILL.md router is re-rendered in place by gstack-relink (disabled_skills, outside_provider);
+# setup rewrites it after the merge, so restore it rather than treating it as local work.
+git diff --quiet -- . ':(exclude)SKILL.md' && git diff --cached --quiet || fail "checkout has uncommitted changes to tracked files; not touching it"
+git checkout -q -- SKILL.md
 git remote get-url upstream >/dev/null 2>&1 || git remote add upstream https://github.com/garrytan/gstack.git
 git fetch -q origin main && git fetch -q upstream main || fail "fetch failed (network or auth)"
 
