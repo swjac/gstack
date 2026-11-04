@@ -61,6 +61,8 @@ export interface GenerationOptions {
   planMode?: boolean;
   /** Module loadout (scripts/modules.ts selectModules); null/undefined = `full`. */
   modules?: ModuleFilter | null;
+  /** Claude-host outside reviewer (gstack-config outside_provider); null/undefined = Codex. */
+  outsideProvider?: 'gemini' | null;
 }
 
 interface RenderOptions {
@@ -74,6 +76,7 @@ interface RenderOptions {
   gbrainDetected: boolean;
   planMode: boolean;
   modules: ModuleFilter | null;
+  outsideProvider: 'gemini' | null;
 }
 
 export interface GeneratedArtifact {
@@ -146,7 +149,14 @@ function parseGenerationArgs(args: string[]): GenerationOptions {
     throw new Error(`Unknown plan mode: ${planModeValue}. Use 'on' or 'off'.`);
   }
   const planMode = planModeValue === 'off' ? false : true;
+  const outsideValue = value('--outside-provider') ?? 'codex';
+  if (outsideValue !== 'codex' && outsideValue !== 'gemini') {
+    throw new Error(`Unknown outside provider: ${outsideValue}. Use 'codex' (default) or 'gemini'.`);
+  }
   const outDir = value('--out-dir');
+  if (outsideValue === 'gemini' && (host !== 'claude' || outDir === undefined || path.resolve(outDir) === ROOT)) {
+    throw new Error('--outside-provider gemini renders the Claude host into an --out-dir outside the checkout root; the committed tree always uses Codex');
+  }
   const linkRoot = value('--link-root');
   const disabledValue = value('--disabled-skills');
   const disabledSkills = (disabledValue ?? '').split(/[\s,]+/).filter(Boolean);
@@ -172,6 +182,7 @@ function parseGenerationArgs(args: string[]): GenerationOptions {
     installRoot: installRoot ?? null,
     disabledSkills,
     modules,
+    outsideProvider: outsideValue === 'gemini' ? 'gemini' : null,
   };
 }
 
@@ -735,6 +746,7 @@ function buildContext(
     skillName, tmplPath, benefitsFrom, host, paths: HOST_PATHS[host],
     preambleTier, model: options.model ?? getHostConfig(host).defaultModel, interactive, explainLevel: options.explainLevel, installRoot: options.installRoot, planMode: options.planMode,
     ...(options.modules ? { modules: options.modules } : {}),
+    ...(options.outsideProvider ? { outsideProvider: options.outsideProvider } : {}),
   };
 }
 
@@ -990,6 +1002,7 @@ export async function runGeneration(settings: GenerationOptions = {}): Promise<G
     gbrainDetected: settings.gbrainDetected ?? loadGbrainOverride(settings.respectDetection ?? false),
     planMode: settings.planMode ?? true,
     modules: settings.modules ?? null,
+    outsideProvider: settings.outsideProvider ?? null,
   };
   const hosts = settings.host === 'all' ? ALL_HOST_NAMES as Host[] : [settings.host ?? 'claude'];
   const log = settings.log ?? (() => {});

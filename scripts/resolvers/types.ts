@@ -126,6 +126,12 @@ export interface TemplateContext {
    */
   planMode?: boolean;
   /**
+   * Outside reviewer for the Claude host (`gen-skill-docs --outside-provider`).
+   * Undefined = Codex, the committed render. 'gemini' (gstack-config
+   * outside_provider gemini) routes outside reviews through bin/gstack-gemini.
+   */
+  outsideProvider?: 'gemini';
+  /**
    * Module loadout filter (modules/loadouts.json, gen-skill-docs --loadout/--modules).
    * Undefined = the `full` loadout: every module renders and committed bytes are unchanged.
    */
