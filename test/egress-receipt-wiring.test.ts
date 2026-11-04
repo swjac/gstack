@@ -87,6 +87,9 @@ const MODULE_SINKS = [
   // Multi-agent wave B3: the api outside-voice runner POSTs a review prompt
   // (plan text, sensitive-class) to OpenAI or Anthropic; sink 'outside-voice-api'.
   'lib/outside-voice-api.ts',
+  // outside_provider gemini over gemini_transport antigravity: the review
+  // prompt goes to the user's Antigravity agent (Google); sink 'outside-voice-antigravity'.
+  'lib/antigravity-agent.ts',
   // Unconditional: context-bill ships in the same tree as this tripwire. A
   // missing file must fail loudly (a rename/move that drops its receipt wiring
   // is exactly what this pins), not silently soften the assertion.
