@@ -1203,7 +1203,7 @@ _render_install() {
   rm -rf "$tmp"
   rc=0
   if [ "$host" = claude ]; then
-    out="$(cd "$SOURCE_GSTACK_DIR" && bun_cmd run gen:skill-docs:user --host claude --out-dir "$tmp" --link-root "$render" --install-root "$named" --model "$_GSTACK_OVERLAY" ${_DISABLED_CSV:+"--disabled-skills=$_DISABLED_CSV"} ${_PLAN_MODE_ARG:+"$_PLAN_MODE_ARG"} ${_LOADOUT_ARG:+"$_LOADOUT_ARG"} 2>&1)" || rc=$?
+    out="$(cd "$SOURCE_GSTACK_DIR" && bun_cmd run gen:skill-docs:user --host claude --out-dir "$tmp" --link-root "$render" --install-root "$named" --model "$_GSTACK_OVERLAY" ${_DISABLED_CSV:+"--disabled-skills=$_DISABLED_CSV"} ${_PLAN_MODE_ARG:+"$_PLAN_MODE_ARG"} ${_LOADOUT_ARG:+"$_LOADOUT_ARG"} ${_OUTSIDE_ARG:+"$_OUTSIDE_ARG"} 2>&1)" || rc=$?
     want="$(find "$SOURCE_GSTACK_DIR" -mindepth 2 -maxdepth 2 -name SKILL.md | wc -l)"
     got="$(find "$tmp" -mindepth 2 -maxdepth 2 -name SKILL.md 2>/dev/null | wc -l)"
     [ "$rc" -ne 0 ] || { [ "$want" -eq "$got" ] && grep -qF "$named/bin/gstack-skill-start --skill" "$tmp/SKILL.md" 2>/dev/null; } \
@@ -1538,6 +1538,7 @@ _persist_claude_loadout
 # claude_loadout (GSTA-161): a non-full loadout renders the Claude skills into
 # the untracked render dir, like plan_mode_preamble=off (docs/loadouts.md).
 gstack_claude_loadout_arg "$GSTACK_CONFIG"
+gstack_claude_outside_arg "$GSTACK_CONFIG"
 
 migrate_direct_codex_install() {
   local gstack_dir="$1"
@@ -4481,7 +4482,7 @@ if [ -x "$DETECT_BIN" ]; then
           # No pipe before the || guard: `cmd | tail -3` reports TAIL's exit
           # status, so a generator crash read as success (same masking the
           # main gen:skill-docs site had). Capture, show the tail, propagate.
-          _GEN_USER_OUT=$(bun_cmd run gen:skill-docs:user --host claude --out-dir "$_GSTACK_RENDER_TMP" --link-root "$_GSTACK_RENDER_DIR" --model "$_GSTACK_OVERLAY" ${_DISABLED_CSV:+"--disabled-skills=$_DISABLED_CSV"} ${_PLAN_MODE_ARG:+"$_PLAN_MODE_ARG"} ${_LOADOUT_ARG:+"$_LOADOUT_ARG"} 2>&1)
+          _GEN_USER_OUT=$(bun_cmd run gen:skill-docs:user --host claude --out-dir "$_GSTACK_RENDER_TMP" --link-root "$_GSTACK_RENDER_DIR" --model "$_GSTACK_OVERLAY" ${_DISABLED_CSV:+"--disabled-skills=$_DISABLED_CSV"} ${_PLAN_MODE_ARG:+"$_PLAN_MODE_ARG"} ${_LOADOUT_ARG:+"$_LOADOUT_ARG"} ${_OUTSIDE_ARG:+"$_OUTSIDE_ARG"} 2>&1)
           _GEN_USER_RC=$?
           printf '%s\n' "$_GEN_USER_OUT" | tail -3
           exit "$_GEN_USER_RC"
@@ -4508,7 +4509,7 @@ if [ -x "$DETECT_BIN" ]; then
       # A render from a previous gbrain install would shadow canonical files
       # on the next link/relink — drop it and restore canonical links. A
       # pinned overlay re-renders it without brain blocks instead (below).
-      if [ -d "$_GSTACK_RENDER_DIR" ] && [ -z "${GSTACK_SKIP_GBRAIN_REGEN:-}" ] && [ "$INSTALL_CLAUDE" -eq 1 ] && [ "$_GSTACK_OVERLAY" = claude ] && [ -z "$_PLAN_MODE_ARG" ] && [ -z "$_LOADOUT_ARG" ]; then
+      if [ -d "$_GSTACK_RENDER_DIR" ] && [ -z "${GSTACK_SKIP_GBRAIN_REGEN:-}" ] && [ "$INSTALL_CLAUDE" -eq 1 ] && [ "$_GSTACK_OVERLAY" = claude ] && [ -z "$_PLAN_MODE_ARG" ] && [ -z "$_LOADOUT_ARG" ] && [ -z "$_OUTSIDE_ARG" ]; then
         rm -rf "$_GSTACK_RENDER_DIR"
         gstack_claude_render_settle "$SOURCE_GSTACK_DIR" "$_GSTACK_RENDER_DIR" absent removed
         if [ "${_CLAUDE_SKILLS_LINKED:-0}" -eq 1 ]; then

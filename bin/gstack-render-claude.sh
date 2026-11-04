@@ -22,6 +22,10 @@
 # written by ./setup --loadout; GSTA-161): a non-full loadout is rendered
 # into the render dir like a pinned overlay, and the checkout stays full.
 #
+# Callers set _OUTSIDE_ARG with gstack_claude_outside_arg (outside_provider,
+# gemini or codex): gemini is rendered into the render dir the same way, and
+# the committed render keeps Codex.
+#
 # Callers define `_swap_in_render` (setup and bin/gstack-config each keep
 # their tested copy) and may define `log` and `bun_cmd`; plain echo and bun
 # are used otherwise.
@@ -77,6 +81,19 @@ gstack_claude_loadout_arg() {
   fi
 }
 
+# gstack_claude_outside_arg CONFIG_BIN — set _OUTSIDE_ARG to
+# --outside-provider=gemini when outside_provider is gemini, else empty.
+gstack_claude_outside_arg() {
+  local CONFIG_BIN="$1" value
+  _OUTSIDE_ARG=""
+  value="$("$CONFIG_BIN" get outside_provider 2>/dev/null || true)"
+  case "$value" in
+    ''|codex) ;;
+    gemini) _OUTSIDE_ARG="--outside-provider=gemini" ;;
+    *) _gstack_render_say "  note: outside_provider '$value' is not codex or gemini; using Codex. Fix: gstack-config set outside_provider gemini" ;;
+  esac
+}
+
 # gstack_claude_overlay_field RECORD KEY — one field of an activation record.
 gstack_claude_overlay_field() {
   [ -f "$1" ] || return 0
@@ -115,11 +132,12 @@ gstack_render_unlock() {
 gstack_claude_render_action() {
   local render_dir="$1" gbrain="$2" previous
   if [ "$gbrain" = ok ]; then _GSTACK_RENDER_ACTION=user; return 0; fi
-  if [ "$_GSTACK_OVERLAY" != claude ] || [ -n "${_PLAN_MODE_ARG:-}" ] || [ -n "${_LOADOUT_ARG:-}" ]; then _GSTACK_RENDER_ACTION=plain; return 0; fi
+  if [ "$_GSTACK_OVERLAY" != claude ] || [ -n "${_PLAN_MODE_ARG:-}" ] || [ -n "${_LOADOUT_ARG:-}" ] || [ -n "${_OUTSIDE_ARG:-}" ]; then _GSTACK_RENDER_ACTION=plain; return 0; fi
   previous="$(gstack_claude_overlay_field "$render_dir.overlay" overlay)"
   if [ "$gbrain" = unknown ] && [ "${previous:-claude}" = claude ] \
     && [ -z "$(gstack_claude_overlay_field "$render_dir.overlay" plan_mode)" ] \
-    && [ -z "$(gstack_claude_overlay_field "$render_dir.overlay" loadout)" ]; then
+    && [ -z "$(gstack_claude_overlay_field "$render_dir.overlay" loadout)" ] \
+    && [ -z "$(gstack_claude_overlay_field "$render_dir.overlay" outside)" ]; then
     _GSTACK_RENDER_ACTION=keep
   else
     _GSTACK_RENDER_ACTION=remove
@@ -132,8 +150,8 @@ gstack_claude_render_plain() {
   local src="$1" RENDER_DIR="$2" RENDER_TMP out rc=0
   RENDER_TMP="$RENDER_DIR.tmp.$$"
   rm -rf "$RENDER_TMP"
-  _gstack_render_say "Rendering Claude skills with the $_GSTACK_OVERLAY overlay${_PLAN_MODE_ARG:+ and no plan-mode preamble}${_LOADOUT_ARG:+ and the ${_LOADOUT_ARG#--loadout=} loadout} into $RENDER_DIR (source checkout stays clean)..."
-  out="$(cd "$src" && _gstack_render_bun run gen:skill-docs --host claude --out-dir "$RENDER_TMP" --link-root "$RENDER_DIR" --model "$_GSTACK_OVERLAY" ${_DISABLED_CSV:+"--disabled-skills=$_DISABLED_CSV"} ${_PLAN_MODE_ARG:+"$_PLAN_MODE_ARG"} ${_LOADOUT_ARG:+"$_LOADOUT_ARG"} 2>&1)" || rc=$?
+  _gstack_render_say "Rendering Claude skills with the $_GSTACK_OVERLAY overlay${_PLAN_MODE_ARG:+ and no plan-mode preamble}${_LOADOUT_ARG:+ and the ${_LOADOUT_ARG#--loadout=} loadout}${_OUTSIDE_ARG:+ and Gemini outside reviews} into $RENDER_DIR (source checkout stays clean)..."
+  out="$(cd "$src" && _gstack_render_bun run gen:skill-docs --host claude --out-dir "$RENDER_TMP" --link-root "$RENDER_DIR" --model "$_GSTACK_OVERLAY" ${_DISABLED_CSV:+"--disabled-skills=$_DISABLED_CSV"} ${_PLAN_MODE_ARG:+"$_PLAN_MODE_ARG"} ${_LOADOUT_ARG:+"$_LOADOUT_ARG"} ${_OUTSIDE_ARG:+"$_OUTSIDE_ARG"} 2>&1)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     rm -rf "$RENDER_TMP"
     printf '%s\n' "$out" | tail -3
@@ -185,6 +203,7 @@ gstack_claude_render_settle() {
         "$served" "$_GSTACK_OVERLAY_SOURCE" "$_GSTACK_OVERLAY_ID" "${version:-unknown}" "$gbrain" "$render_kind"
       [ "$render_kind" != user ] || [ -z "${_PLAN_MODE_ARG:-}" ] || printf 'plan_mode=off\n'
       [ "$render_kind" != user ] || [ -z "${_LOADOUT_ARG:-}" ] || printf 'loadout=%s\n' "${_LOADOUT_ARG#--loadout=}"
+      [ "$render_kind" != user ] || [ -z "${_OUTSIDE_ARG:-}" ] || printf 'outside=gemini\n'
     } > "$record.tmp.$$" && mv "$record.tmp.$$" "$record"
   fi
   gstack_render_unlock "$render_dir"
