@@ -14,7 +14,7 @@
  */
 import { toShellPath, type TemplateContext } from './types';
 import { CC_BACKGROUND_DEFAULT_SINCE, FOREGROUND_IF_AVAILABLE, BACKGROUND_RECOVERY } from './constants';
-import { outsideVoiceFailurePolicy, outsideVoiceFor, outsideVoiceInvocation, outsideVoicePreflight, outsideVoiceProvenance, OUTSIDE_VERDICT_REQUEST } from './outside-voice';
+import { LOGIN, outsideVoiceFailurePolicy, outsideVoiceFor, outsideVoiceInvocation, outsideVoicePreflight, outsideVoiceProvenance, OUTSIDE_VERDICT_REQUEST } from './outside-voice';
 import { runtimeRootPrelude } from './runtime-root';
 import { DEFENSIVE_REVIEW_FRAMING, fixtureSummaryMode } from './defensive-review';
 import { BLOCKING_FLOOR } from '../../lib/review-scope';
@@ -432,7 +432,7 @@ only its \`OUTSIDE VOICE (...)\` subagent report; never print both for one revie
 
 ${ceo ? `**Native fallback — provider unavailable or execution failed, with reviews enabled:**
 
-Report the actual failure: authentication needs \`${outsideVoiceFor(ctx).id === 'codex' ? 'codex login' : 'claude auth login'}\`;
+Report the actual failure: authentication needs \`${LOGIN[outsideVoiceFor(ctx).id]}\`;
 timeout means the five-minute limit expired; empty output means no response.
 Other preflight failures retain their printed diagnosis, including harness mismatch.
 These failures do not block the review; they use the bounded fallback below.

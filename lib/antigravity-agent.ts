@@ -110,6 +110,8 @@ export function agentPrompt(requestFile: string, outFile: string, cwd: string): 
     'Answer the review request exactly as it asks, in its required format, and finish promptly.',
     // gstack reads a clean claim followed by commentary as unverified (lib/outside-review-result.ts), as a live Argon review showed.
     'If you find no defects, write the line NO_FINDINGS by itself instead of describing what the code does well, then any line the request requires (such as Recommendation: ...).',
+    // Upstream's parser (GST-1821) reads a clean review only from this line, and only when nothing follows it.
+    'If the request asks for a VERDICT line, write it plainly as the very last line of the answer, with nothing after it and outside any code block.',
     `Write your complete answer, and nothing else, to this file: ${outFile}`,
     `When that file is fully written, create the empty file ${outFile}.done`,
     'Those two files are the only files you may create.',

@@ -17,7 +17,7 @@ export function outsideVoiceFor(ctx: Pick<TemplateContext, 'host' | 'outsideProv
 
 /** Supplied-input providers run through a gstack wrapper with no tools; the parent sends the diff. */
 const WRAPPER = { 'claude-code': 'gstack-claude-code', gemini: 'gstack-gemini' } as const;
-const LOGIN = { codex: 'codex login', 'claude-code': 'claude auth login', gemini: 'gstack-gemini --probe' } as const;
+export const LOGIN = { codex: 'codex login', 'claude-code': 'claude auth login', gemini: 'gstack-gemini --probe' } as const;
 
 const sh = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
 

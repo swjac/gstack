@@ -10,6 +10,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { callModel } from '../lib/outside-voice-api';
+import { agentPrompt } from '../lib/antigravity-agent';
+import { classifyOutsideReview } from '../lib/outside-review-result';
 import { outsideVoiceCommand, outsideVoiceFor, outsideVoicePreflight, generateOutsideVoiceRouting } from '../scripts/resolvers/outside-voice';
 import { HOST_PATHS, type TemplateContext } from '../scripts/resolvers/types';
 
@@ -251,6 +253,22 @@ console.log(JSON.stringify({ response: { newConversation: { prompt, conversation
     expect(r2.json).toMatchObject({ status: 'unavailable', error: { code: 'model' } });
     const r3 = await gemini({ ...a.env, FAKE_AGY_MODE: 'silent' }, ['--cwd', repo, '--timeout-ms', '1500'], 'p');
     expect(r3.json).toMatchObject({ status: 'unavailable', error: { code: 'timeout' }, conversation_id: 'conv-123' });
+  });
+});
+
+describe('the answer format the Antigravity agent is told to write', () => {
+  // The daily fork sync runs this file, so an upstream parser change that stops accepting this format fails before it deploys.
+  const clean = 'NO_FINDINGS\nRecommendation: ship because no defects were found.\nVERDICT: CLEAN';
+  test('reads clean only with the last-line verdict the prompt asks for', () => {
+    expect(agentPrompt('/req', '/out', '/repo')).toContain('NO_FINDINGS');
+    expect(agentPrompt('/req', '/out', '/repo')).toContain('VERDICT line');
+    for (const gate of ['review', 'structured'] as const) {
+      expect(classifyOutsideReview({ text: clean, gate }).verdict).toBe('clean');
+      expect(classifyOutsideReview({ text: clean.replace('\nVERDICT: CLEAN', ''), gate }).verdict).toBe('unverified');
+    }
+  });
+  test('tagged findings with VERDICT: FINDINGS block the gate', () => {
+    expect(classifyOutsideReview({ text: `[P1] a.ts:3 drops the guard.\nRecommendation: restore it because data is lost.\nVERDICT: FINDINGS`, gate: 'structured' }).verdict).toBe('findings');
   });
 });
 
