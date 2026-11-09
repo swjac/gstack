@@ -7,7 +7,12 @@
  * the real executable against stub gh/glab on POSIX.
  */
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { EXIT, attributionCallout, mergeBodySections, runPost, type PostEnv } from "../lib/gstack-post";
+import { extractReceipt, orderReceipt, placeReceipt, receiptRuns } from "../lib/ship-receipt";
+import type { ShipReceipt } from "../lib/headless-artifacts";
 
 interface Call { cmd: string; args: string[]; input?: string }
 
@@ -285,6 +290,83 @@ describe("gstack-post owns the redaction scan", () => {
       const f = fakeEnv({ files: { "/b": body + "\n" }, visibility: "public" });
       expect([body, run(["pr-comment", "12", "--body-file", "/b"], f)]).toEqual([body, EXIT.confirm]);
       expect(f.stdout()).toContain("RULE: pii.phone.e164 LINE: 1 PART: body");
+      expect(f.posts()).toEqual([]);
+    }
+  });
+
+  // Value: protects=a ship receipt the writer renders (lib/ship-receipt.ts placeReceipt) posts through pr-body without a pii.phone.e164 confirmation
+  //   when its run-id fields (ci_carried[].run, flaky_exception[].runs, issues.flakes[].run) hold GitHub Actions run ids (GST-2047), while a phone
+  //   number in prose, beside the block, in any other receipt field, in a run-id field holding something other than a run id, or inside a forged, hand-written or malformed receipt block still needs one;
+  //   fails_when=every ship tail with carried CI holds once per carried run, or the exemption reaches past the run-id values of a writer-rendered,
+  //   schema-valid block (a run id copied into prose, a non-run-id key, a fake block); why_new=the run-word and runs= tests read prose, and the
+  //   receipt's JSON puts a quote between the key and the id; seam=fake run; no_claim=real gh
+  test("run ids in a writer-rendered receipt's run-id fields are not phone numbers; the same number anywhere else, or in a fake block, still is", () => {
+    const CARRIED = [42574388503, 42574388504, 42574391177, 42574402011];
+    const receipt = (extra: Partial<ShipReceipt> = {}) => orderReceipt({
+      schema_version: 1, pr: 4200, head: "68b1d0560a3f4e2b9c7d1e5f8a2b3c4d5e6f7a8b", base: "main",
+      ci_carried: CARRIED.map((run, i) => ({ lane: ["free-tests", "windows-smoke", "e2e-gate", "llm-judge"][i]!, run, attempt: i === 1 ? 2 : 1, tree: "9f2c4e1a7b3d5c8e0f6a2b4d6e8f0a1c3e5b7d9f" })),
+      ...extra,
+    });
+    const body = (r: ShipReceipt, prose = "Narrows one false positive.") => placeReceipt(`## What changed\n\n${prose}\n`, r);
+    const post = (text: string) => {
+      const f = fakeEnv({ files: { "/b": text }, visibility: "public" });
+      return { code: run(["pr-body", "4200", "--replace", "--body-file", "/b"], f), phones: f.stdout().split("\n").filter(l => l.startsWith("RULE: pii.phone.e164 ")), f };
+    };
+    const lineOf = (text: string, needle: string) => text.split("\n").findIndex(l => l.includes(needle)) + 1;
+
+    const flaky = { flaky_exception: [{ lane: "free-tests", runs: ["42574388503/1", "42574388511/2"], cases: ["test/retry.test.ts::retries"], grant: "a-1", by: "Garry" }], issues: { fixes: [4100], refs: [], flakes: [{ issue: 4101, run: "42574388519" }] } };
+    for (const text of [body(receipt()), body(receipt(flaky))]) {
+      expect(extractReceipt(text)).toMatchObject({ found: true, errors: [] });
+      const { code, phones, f } = post(text);
+      expect([phones, code]).toEqual([[], EXIT.posted]);
+      expect(f.posts()).toHaveLength(1);
+    }
+
+    const holds: Array<[string, string, string]> = [
+      ["E.164 in prose", body(receipt(), "Call +14155552671 for the on-call."), "+14155552671"],
+      ["bare 11-digit in prose", body(receipt(), "Call 14155552671 for the on-call."), "14155552671"],
+      ["a carried run id copied into prose", body(receipt(), "Call 42574388503 after five."), "Call 42574388503"],
+      ["thread field", body(receipt({ thread: "14155552671" })), "\"thread\": \"14155552671\""],
+      ["ci_carried attempt", body(receipt({ ci_carried: [{ lane: "free-tests", run: 42574388503, attempt: 14155552671, tree: "9f2c4e1a7b3d" }] })), "\"attempt\": 14155552671"],
+      ["ci_carried lane", body(receipt({ ci_carried: [{ lane: "+14155552671", run: 42574388503, attempt: 1, tree: "9f2c4e1a7b3d" }] })), "\"lane\": \"+14155552671\""],
+      ["issues.flakes issue", body(receipt({ issues: { fixes: [], refs: [], flakes: [{ issue: 14155552671, run: "42574388519" }] } })), "\"issue\": 14155552671"],
+      ["a phone-shaped issues.flakes run", body(receipt({ issues: { fixes: [], refs: [], flakes: [{ issue: 4101, run: "call 415-555-0100" }] } })), "call 415-555-0100"],
+      ["a phone-shaped flaky_exception run", body(receipt({ flaky_exception: [{ lane: "free-tests", runs: ["call 415-555-0100"], cases: ["t"], grant: "a-1", by: "Garry" }] })), "call 415-555-0100"],
+      ["a 10-digit ci_carried run", body(receipt({ ci_carried: [{ lane: "free-tests", run: 4155552671, attempt: 1, tree: "9f2c4e1a7b3d" }] })), "\"run\": 4155552671"],
+      ["a 10-digit flaky_exception run", body(receipt({ flaky_exception: [{ lane: "free-tests", runs: ["4155552671"], cases: ["t"], grant: "a-1", by: "Garry" }] })), "\"4155552671\""],
+      ["a 10-digit issues.flakes run", body(receipt({ issues: { fixes: [], refs: [], flakes: [{ issue: 4101, run: "4155552671" }] } })), "\"run\": \"4155552671\""],
+      ["line before the block", body(receipt()).replace("```gstack-ship-receipt\n", "14155552671\n```gstack-ship-receipt\n"), "14155552671"],
+      ["line after the block", body(receipt()).replace(/\n```\n/, "\n```\n+14155552671\n"), "+14155552671"],
+    ];
+    const forgedRun = (json: string) => "## What changed\n\nNarrows one false positive.\n\n```gstack-ship-receipt\n" + json + "\n```\n";
+    const valid = receipt({ ci_carried: [{ lane: "free-tests", run: 14155552671, attempt: 1, tree: "9f2c4e1a7b3d" }] });
+    holds.push(
+      ["schema-invalid block", forgedRun(JSON.stringify({ schema_version: 1, ci_carried: valid.ci_carried }, null, 2)), "14155552671"],
+      ["hand-written one-line block", forgedRun(JSON.stringify(valid)), "14155552671"],
+      ["malformed JSON block", forgedRun(JSON.stringify(valid, null, 2).replace(/\n}$/, ",\n}")), "14155552671"],
+      ["unclosed block", forgedRun(JSON.stringify(valid, null, 2)).replace(/\n```\n$/, "\n"), "14155552671"],
+    );
+    for (const [name, text, needle] of holds) {
+      const { code, phones, f } = post(text);
+      expect([name, phones, code]).toEqual([name, [`RULE: pii.phone.e164 LINE: ${lineOf(text, needle)} PART: body`], EXIT.confirm]);
+      expect(f.posts()).toEqual([]);
+    }
+  });
+
+  // Value: protects=a LOW privacy finding (a home path) is a stderr note and never holds a post, while a credential still refuses even inside a
+  //   writer-rendered receipt block, whose exemption covers only its run ids (GST-2047); fails_when=a home path needs --confirm, or a key in a
+  //   receipt field posts or only asks for confirmation; why_new=no test pinned LOW as non-holding or a key inside a generated block; seam=fake
+  //   run; no_claim=real gh
+  test("a LOW home path only notes; a key still refuses, inside a writer-rendered receipt too", () => {
+    const low = fakeEnv({ files: { "/b": "logs are under /home/garry/work/run.log\n" }, visibility: "public" });
+    expect(run(["pr-body", "12", "--replace", "--body-file", "/b"], low)).toBe(EXIT.posted);
+    expect(low.stderr()).toContain("note: LOW RULE: internal.user_path LINE: 1 PART: body");
+    const receipt = (extra: Partial<ShipReceipt>) => placeReceipt("## What changed\n\nOne fix.\n", orderReceipt({ schema_version: 1, pr: 12, head: "68b1d0560a3f4e2b9c7d1e5f8a2b3c4d5e6f7a8b", base: "main", ci_carried: [{ lane: "free-tests", run: 42574388503, attempt: 1, tree: "9f2c4e1a7b3d" }], ...extra }));
+    for (const body of [receipt({ thread: AWS }), receipt({ flaky_exception: [{ lane: "free-tests", runs: [AWS], cases: ["t"], grant: "a-1", by: "Garry" }] })]) {
+      expect(extractReceipt(body)).toMatchObject({ found: true, errors: [] });
+      const f = fakeEnv({ files: { "/b": body }, visibility: "public" });
+      expect(run(["pr-body", "12", "--replace", "--body-file", "/b"], f)).toBe(EXIT.refused);
+      expect(f.stdout()).toMatch(/^HIGH RULE: aws\./m);
       expect(f.posts()).toEqual([]);
     }
   });
@@ -738,7 +820,7 @@ describe("gstack-post pr-body merges the PR body by section", () => {
     expect(() => mergeBodySections(current, RECEIPT("cccc") + "\n## A\n\nnew\n")).toThrow('holds "ship receipt" more than once');
   });
 
-  // Value: protects=the body /ship composes (lib/ship-receipt.ts placeReceiptFirst: the receipt block, one blank line, then the sections) reposts
+  // Value: protects=the body /ship composes (lib/ship-receipt.ts placeReceipt: the receipt block, one blank line, then the sections) reposts
   // idempotently: merged into a PR body of the same shape it yields the file's bytes, the receipt stays byte-first, and the stderr line reports no
   // addition; fails_when=the blank line after the receipt is read as new leading text and prepended before the receipt (one more leading newline per
   // repost, "added leading text" on every /ship re-READY), or a kept blank line is counted as added; why_new=the merge tests above post a receipt-only
@@ -774,3 +856,124 @@ describe("gstack-post pr-body merges the PR body by section", () => {
     expect(afterReceipt.dropped).toEqual([]);
   });
 });
+
+describe("gstack-post keeps the Agent notes section last", () => {
+  const RECEIPT = (head: string) => "```gstack-ship-receipt\n{\n  \"head\": \"" + head + "\"\n}\n```\n";
+  const NOTES = (content: string) => "<!-- gstack:agent-notes -->\n<details><summary>Agent notes</summary>\n\n" + content + "\n\n</details>\n";
+  const composed = (head: string, summary: string) => "Opening sentence.\n\n## Summary\n\n" + summary + "\n\n## Test plan\n\n- [x] bun test\n\n" + NOTES("Plan: exempt: docs-only\n\n" + RECEIPT(head).trim());
+
+  // Value: protects=the body /ship composes since GST-1825 (opening, sections, Agent notes last) reposts byte for byte and replaces the notes as one
+  // section; fails_when=the receipt inside the notes is split out as its own section, or the notes stop being last; why_new=the notes section is new;
+  // seam=none (mergeBodySections); no_claim=the gh round trip
+  test("a full post whose notes section is last reposts byte for byte and replaces the notes, receipt included, as one section", () => {
+    const first = mergeBodySections(composed("aaaa", "old"), composed("bbbb", "new"));
+    expect(first.body).toBe(composed("bbbb", "new"));
+    expect([first.replaced, first.kept, first.added, first.dropped]).toEqual([["leading text", "Summary", "Test plan", "Agent notes"], [], [], []]);
+    expect(mergeBodySections(first.body, composed("bbbb", "new")).body).toBe(composed("bbbb", "new"));
+  });
+
+  // Value: protects=a partial post keeps the current notes and they stay last, above a Capy badge that ends the body; fails_when=a new section is
+  // appended after the notes or the badge moves above them; why_new=the notes section is new; seam=none; no_claim=the gh round trip
+  test("a partial post appends new sections above the kept notes, and a trailing Capy badge stays after them", () => {
+    const badge = "<!-- capy-badge:start -->\nB\n<!-- capy-badge:end -->\n";
+    const current = composed("aaaa", "old") + "\n" + badge;
+    const m = mergeBodySections(current, "## Why\n\nBecause.\n");
+    expect(m.body).toBe("Opening sentence.\n\n## Summary\n\nold\n\n## Test plan\n\n- [x] bun test\n\n## Why\n\nBecause.\n\n" + NOTES("Plan: exempt: docs-only\n\n" + RECEIPT("aaaa").trim()) + "\n" + badge);
+    expect(m.added).toEqual(["Why"]);
+    expect(m.kept).toContain("Agent notes");
+  });
+
+  // Value: protects=a PR posted before the notes section (receipt at the top) still merges: a partial post keeps the legacy receipt where it is, and a
+  // full post with notes last replaces it, so one receipt remains and it is the notes' one; fails_when=the legacy receipt survives a full post (two
+  // receipts, the stale one first) or a partial post drops it; why_new=the legacy layout meets the new one; seam=none; no_claim=the gh round trip
+  // Value: protects=a receipt posted on its own to a body whose Agent notes hold one replaces that receipt, so the new one binds and the old one
+  // joins the runs block; fails_when=the posted receipt lands outside the notes while the old one stays authoritative; why_new=review finding
+  // gstack-post.ts:212; seam=none (mergeBodySections); no_claim=the gh round trip
+  test("a receipt posted on its own replaces the one in the notes, so the new receipt binds", () => {
+    const m = mergeBodySections(composed("aaaa", "old"), RECEIPT("bbbb"));
+    expect(extractReceipt(m.body).receipt!.head).toBe("bbbb");
+    expect(m.body.match(/```gstack-ship-receipt/g)).toHaveLength(1);
+    expect(receiptRuns(m.body).map(r => r.head)).toEqual(["aaaa"]);
+    expect(m.body).toStartWith("Opening sentence.\n\n## Summary\n\nold\n\n## Test plan\n\n- [x] bun test\n\n<!-- gstack:agent-notes -->");
+    expect(m.replaced).toContain("ship receipt");
+  });
+
+  // Value: protects=the PR's own opening paragraph and run history when a receipt posted with text or a runs block after it goes into the notes;
+  // fails_when=the text after the receipt replaces the opening, or the file's runs block lands in the readable part; why_new=review finding
+  // gstack-post.ts:283 (adversarial-native#1, outside-voice#1); seam=none (mergeBodySections); no_claim=the gh round trip
+  test("a receipt posted with text and a runs block after it keeps the opening paragraph and the notes' run history", () => {
+    const runs = "\`\`\`gstack-receipt-runs\n" + JSON.stringify({ head: "cccc" }) + "\n\`\`\`\n";
+    const m = mergeBodySections(composed("aaaa", "old"), RECEIPT("bbbb") + runs + "\nNote under receipt.\n");
+    expect(m.body).toStartWith("Opening sentence.\n\n");
+    expect(m.replaced).not.toContain("leading text");
+    expect(m.body).toContain("Note under receipt.");
+    expect(extractReceipt(m.body).receipt!.head).toBe("bbbb");
+    expect(m.body.match(/```gstack-receipt-runs/g)).toHaveLength(1);
+    expect(receiptRuns(m.body).map(r => r.head)).toEqual(["aaaa"]);
+  });
+
+  test("a legacy receipt-at-top body still merges: a partial post keeps it, a full post with notes last replaces it", () => {
+    const legacy = RECEIPT("aaaa") + "\n## Summary\n\nold\n\n## Approvals\n\nPlan: exempt: docs-only\n";
+    const partial = mergeBodySections(legacy, "## Summary\n\nnew\n");
+    expect(partial.body).toBe(RECEIPT("aaaa") + "\n## Summary\n\nnew\n\n## Approvals\n\nPlan: exempt: docs-only\n");
+    const full = mergeBodySections(legacy, composed("bbbb", "new"));
+    expect(full.body).toBe("Opening sentence.\n\n## Summary\n\nnew\n\n## Approvals\n\nPlan: exempt: docs-only\n\n## Test plan\n\n- [x] bun test\n\n" + NOTES("Plan: exempt: docs-only\n\n" + RECEIPT("bbbb").trim()));
+    expect(full.body.match(/```gstack-ship-receipt/g)).toHaveLength(1);
+    expect(full.replaced).toEqual(["ship receipt", "Summary"]);
+  });
+});
+
+describe("gstack-post refuses a title that is not in plain words (exit 4)", () => {
+  const repoWith = (policy: string | null) => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "gstack-post-plain-"));
+    if (policy !== null) { fs.mkdirSync(path.join(root, ".gstack")); fs.writeFileSync(path.join(root, ".gstack", "plain-titles.json"), policy); }
+    return root;
+  };
+  const POLICY = JSON.stringify({ codes: ["\\bGST-\\d+\\b"], terms: ["pregate"], allow: [], since: "2026-11-08", exempt_branch_prefixes: [] });
+
+  // Value: protects=pr-title and pr-create post nothing (no title edit, no PR, no body) when the repository's plain-title policy refuses the title,
+  // print the PLAIN_TITLE lines and exit 4; a plain title with one trailing code posts; fails_when=the check runs after a post or not at all;
+  // why_new=R76 adds the check; seam=a real policy file under the fake root; no_claim=real gh
+  test("a refused title posts nothing, prints PLAIN_TITLE lines and exits 4; a plain title posts", () => {
+    const root = repoWith(POLICY);
+    try {
+      const bad = fakeEnv({ root, files: { "/t": "Make the pregate quieter\n", "/b": "Body.\n" } });
+      expect(run(["pr-title", "7", "--title-file", "/t"], bad)).toBe(EXIT.plainTitle);
+      expect(EXIT.plainTitle).toBe(4);
+      expect(bad.posts()).toEqual([]);
+      expect(bad.stdout()).toContain('PLAIN_TITLE: PLAIN_TITLE_REFUSED term "pregate"');
+      expect(bad.stdout()).toContain("PLAIN_TITLE: refused=1\n");
+      expect(bad.stderr()).toContain("nothing was posted");
+      const create = fakeEnv({ root, files: { "/t": "Fix GST-1713 retries", "/b": "Body.\n" } });
+      expect(run(["pr-create", "--base", "main", "--title-file", "/t", "--body-file", "/b"], create)).toBe(EXIT.plainTitle);
+      expect(create.calls.filter(c => c.cmd === "gh" || c.cmd === "glab")).toEqual([]);
+      const good = fakeEnv({ root, files: { "/t": "Stop gstack from hitting GitHub's rate limit (GST-1713)", "/b": "Body.\n" } });
+      expect(run(["pr-create", "--base", "main", "--title-file", "/t", "--body-file", "/b"], good)).toBe(EXIT.posted);
+      expect(good.posts()).toHaveLength(1);
+      const comment = fakeEnv({ root, files: { "/b": "The pregate passed.\n" } });
+      expect(run(["pr-comment", "7", "--body-file", "/b"], comment)).toBe(EXIT.posted);
+    } finally { fs.rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // Value: protects=a repository without the policy file is never checked, and an invalid policy refuses rather than posting unchecked;
+  // fails_when=the missing file refuses every title or a broken file is ignored; why_new=R76 adds the check; seam=a real file; no_claim=real gh
+  test("no policy file posts unchecked; an invalid policy file refuses with exit 4 and posts nothing", () => {
+    const none = repoWith(null);
+    const broken = repoWith("{ not json");
+    try {
+      const f = fakeEnv({ root: none, files: { "/t": "Make the pregate quieter" } });
+      expect(run(["pr-title", "7", "--title-file", "/t"], f)).toBe(EXIT.posted);
+      const g = fakeEnv({ root: broken, files: { "/t": "Make the pregate quieter" } });
+      expect(run(["pr-title", "7", "--title-file", "/t"], g)).toBe(EXIT.plainTitle);
+      expect(g.posts()).toEqual([]);
+      expect(g.stderr()).toContain("(PLAIN_POLICY_INVALID); nothing was posted");
+    } finally { fs.rmSync(none, { recursive: true, force: true }); fs.rmSync(broken, { recursive: true, force: true }); }
+  });
+
+  test("the help names exit 4", () => {
+    const f = fakeEnv();
+    expect(run(["--help"], f)).toBe(EXIT.posted);
+    expect(f.stdout()).toContain("4 the title is not plain words");
+  });
+});
+

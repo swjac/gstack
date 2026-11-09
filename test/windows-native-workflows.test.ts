@@ -112,19 +112,20 @@ test('a record_durations dispatch times each Windows-safe file alone and uploads
   expect(job.steps.at(-1).if).toBe("always() && steps.seed.outcome == 'success'");
 });
 
-test('windows-smoke is the PR gate: every pull request and main push, one windows-latest job', () => {
+test('windows-smoke is the PR gate: every pull request and main push, one windows-latest job beside the Trunk observer that always runs, its steps skipped only when docs-scope said docs-only (R81)', () => {
   expect(Object.keys(smoke.on).sort()).toEqual(['pull_request', 'push', 'workflow_dispatch']);
   expect(smoke.on.pull_request).toEqual({ branches: ['main'] });
   expect(smoke.on.push).toEqual({ branches: ['main'] });
   expect(smoke.permissions).toEqual({ contents: 'read' });
-  expect(Object.keys(smoke.jobs)).toEqual(['windows-smoke']);
+  expect(Object.keys(smoke.jobs)).toEqual(['trunk-dynamic-ci', 'docs-scope', 'windows-smoke']);
   const job = smoke.jobs['windows-smoke'];
   expect(job['runs-on']).toBe('windows-latest');
-  expect(job.if).toBeUndefined();
+  expect(job.if).toBe('${{ !cancelled() }}');
+  expect(job.needs).toBe('docs-scope');
   const step = (name: string) => job.steps.find((s: any) => s.name === name);
   expect(step('./setup installs into an isolated HOME').run).toContain('./setup --host claude');
   const start = step('The core skills start').run;
-  expect(start).toContain('for skill in ship review qa-only investigate browse; do');
+  expect(start).toContain('for skill in ship review qa-only browse; do');
   expect(start).toContain("grep -q '^SKILL_START_PROTO: 1'");
   expect(step("/browse on gstack's own browser runs a piped chain flow from an unrelated directory").run).toContain('| "$BROWSE" chain');
   const tests = step('Fastest Windows-safe free tests for install and the core skills');

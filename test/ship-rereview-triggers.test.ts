@@ -10,7 +10,7 @@ import * as path from 'node:path';
 import { EXIT } from '../lib/headless-artifacts';
 import { comparePath } from '../lib/ship-patch';
 import { STAMP_PLACEHOLDERS_KEY_VERSION } from '../lib/ship-policy';
-import { extractReceipt, placeReceiptFirst } from '../lib/ship-receipt';
+import { extractReceipt, placeReceipt } from '../lib/ship-receipt';
 import { cleanup, makeFixtureRepo, runBin, write, type FixtureRepo } from './helpers/pregate-fixture';
 import { lineOf, PREFLIGHT, RELEASE, shipFixture, type ShipFx } from './helpers/ship-bin-fixture';
 
@@ -178,7 +178,7 @@ describe('finish route after a base merge (GST-407 #1, GBRA-108 #7739)', () => {
     expect(comparePath(f.work, sides(), 'assets/x.bin')).toBe('changed');
     f.write({ 'assets/x.bin': 'a\u0000b\n', 'src/auth.ts': 'export const authRequired = false;\nexport const a = 2;\n' }); f.commit('flip');
     const r = finish(f, reviewed, post, ['--reviewed-base', reviewedBase]);
-    expect([r.status, lineOf(r.stdout, 'STOP')]).toEqual([3, 'STOP: behavior, tests or build inputs changed since review (src/auth.ts): insert 5–11.5 → 12–14 → 16 before Step 17 (stage 2.1)']);
+    expect([r.status, lineOf(r.stdout, 'STOP')]).toEqual([3, 'STOP: behavior, tests or build inputs changed since review (src/auth.ts): insert 5–11.5 → 12–14 → 16 before Step 17; plan that Step 9 with gstack-review-plan --post-review, which at the round cap stops for the owner\'s grant of one scoped fix-check (stage 2.1)']);
   });
 });
 
@@ -197,7 +197,7 @@ describe('a version stamp after review (GBRA-251, gbrain #8095)', () => {
       const post = snapshot(f);
       f.write({ VERSION: '1.0.1.0\n', 'plugin.json': pluginAfter, 'docs/guide.md': guide('1.0.1.0') }); f.commit('stamp');
       const r = finish(f, reviewed, post, ['--reviewed-base', mergeBase(f)]);
-      if (stops) expect([name, r.status, lineOf(r.stdout, 'STOP')]).toEqual([name, 3, 'STOP: behavior, tests or build inputs changed since review (plugin.json): insert 5–11.5 → 12–14 → 16 before Step 17 (stage 2.1)']);
+      if (stops) expect([name, r.status, lineOf(r.stdout, 'STOP')]).toEqual([name, 3, 'STOP: behavior, tests or build inputs changed since review (plugin.json): insert 5–11.5 → 12–14 → 16 before Step 17; plan that Step 9 with gstack-review-plan --post-review, which at the round cap stops for the owner\'s grant of one scoped fix-check (stage 2.1)']);
       else expect([name, lineOf(r.stdout, 'ROUTE')]).toEqual([name, expect.stringMatching(/ behavior=0 docs=0 metadata=3 tests=0 /)]);
     }
   });
@@ -220,7 +220,7 @@ describe('a restamp after a lost slot (GST-895, GBRA-218, gbrain #8134)', () => 
     mergeMain(f, { VERSION: '1.0.2.0\n', 'src/notice.ts': notice(['0.9.0.0', 'old'], ['1.0.1.0', 'theirs'], [ownRow, 'mine']) });
     return { f, reviewed: wtree(f), reviewedBase: mergeBase(f), post: snapshot(f) };
   };
-  const behaviorStop = 'STOP: behavior, tests or build inputs changed since review (src/notice.ts): insert 5–11.5 → 12–14 → 16 before Step 17 (stage 2.1)';
+  const behaviorStop = 'STOP: behavior, tests or build inputs changed since review (src/notice.ts): insert 5–11.5 → 12–14 → 16 before Step 17; plan that Step 9 with gstack-review-plan --post-review, which at the round cap stops for the owner\'s grant of one scoped fix-check (stage 2.1)';
 
   test('the moved stale stamp is metadata; a moved base row or pre-fork row stops', () => {
     const own = lostSlot('1.0.1.0');
@@ -354,7 +354,7 @@ describe('adjacent base edits (GST-384, #3631, founderstar#441)', () => {
     write(repo.work, 'lib/rows.js', src({ 6: 'exports.v6 = 600;' })); repo.git('commit', '-qam', 'feat: v6');
     const reviewed = repo.git('rev-parse', 'HEAD');
     const body = path.join(repo.root, 'body.md');
-    fs.writeFileSync(body, placeReceiptFirst('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: reviewed, base: 'main', queue_mode: 'stamp-at-merge' } as any));
+    fs.writeFileSync(body, placeReceipt('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: reviewed, base: 'main', queue_mode: 'stamp-at-merge' } as any));
     repo.git('checkout', '-q', 'main');
     write(repo.work, 'lib/rows.js', src({ 5: 'exports.v5 = "five";' })); repo.git('commit', '-qam', 'main: v5'); repo.git('push', '-q', 'origin', 'main');
     repo.git('checkout', '-q', 'feature');
@@ -382,7 +382,7 @@ describe('adjacent base edits (GST-384, #3631, founderstar#441)', () => {
     const guard = (text: string, after: string) => text.replace('authorize();\n', '').replace(after + '\n', after + '\nauthorize();\n');
     const rows = () => fs.readFileSync(path.join(repo.work, 'lib/rows.js'), 'utf8');
     write(repo.work, 'lib/rows.js', guard(rows(), 'exports.v2 = 2;')); repo.git('commit', '-qam', 'feat: guard v2');
-    fs.writeFileSync(body, placeReceiptFirst('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: repo.git('rev-parse', 'HEAD'), base: 'main', queue_mode: 'stamp-at-merge' } as any));
+    fs.writeFileSync(body, placeReceipt('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: repo.git('rev-parse', 'HEAD'), base: 'main', queue_mode: 'stamp-at-merge' } as any));
     write(repo.work, 'lib/rows.js', guard(rows(), 'exports.v4 = 4;')); repo.git('commit', '-qam', 'feat: move the guard');
     const moved = carry();
     expect(moved.status).toBe(EXIT.refused);
@@ -408,7 +408,7 @@ describe('carry with a context path and a gap elsewhere (GST-407 cycle 5)', () =
     write(repo.work, 'lib/rows.js', src({ 6: 'exports.v6 = 600;' })); write(repo.work, 'plugin/b.json', json('b2')); repo.git('commit', '-qam', 'feat: v6, b2');
     const reviewed = repo.git('rev-parse', 'HEAD');
     const body = path.join(repo.root, 'body.md');
-    fs.writeFileSync(body, placeReceiptFirst('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: reviewed, base: 'main', queue_mode: 'stamp-at-merge' } as any));
+    fs.writeFileSync(body, placeReceipt('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: reviewed, base: 'main', queue_mode: 'stamp-at-merge' } as any));
     repo.git('checkout', '-q', 'main');
     write(repo.work, 'lib/rows.js', src({ 5: 'exports.v5 = "five";' })); write(repo.work, 'plugin/b.json', json('b2')); write(repo.work, 'plugin/a.json', json('a2'));
     repo.git('commit', '-qam', 'main: v5, b2 landed, a2'); repo.git('push', '-q', 'origin', 'main');
@@ -418,7 +418,7 @@ describe('carry with a context path and a gap elsewhere (GST-407 cycle 5)', () =
     expect([gap.status, gap.out.trim().split('\n')[0]]).toEqual([EXIT.refused, 'CARRY: refused (RECEIPT_CARRY_PRODUCT_CHANGED)']);
     write(repo.work, 'plugin/b.json', json('b')); write(repo.work, 'lib/rows.js', src({ 5: 'exports.v5 = "five";', 6: 'exports.v6 = 600;' }) + Array.from({ length: 220 }, (_, i) => `exports.w${i} = ${i};\n`).join(''));
     repo.git('commit', '-qam', 'feat: many rows');
-    fs.writeFileSync(body, placeReceiptFirst('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: repo.git('rev-parse', 'HEAD'), base: 'main', queue_mode: 'stamp-at-merge' } as any));
+    fs.writeFileSync(body, placeReceipt('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: repo.git('rev-parse', 'HEAD'), base: 'main', queue_mode: 'stamp-at-merge' } as any));
     repo.git('checkout', '-q', 'main');
     write(repo.work, 'lib/rows.js', src({ 5: 'exports.v5 = "5";' })); repo.git('commit', '-qam', 'main: v5 again'); repo.git('push', '-q', 'origin', 'main');
     repo.git('checkout', '-q', 'feature');
@@ -446,7 +446,7 @@ describe('test-only and audit-requested edits after the docs audit (GST-391, gbr
     f.write({ 'test/b.test.ts': `${spec('b')}test('b is even', () => expect(2 % 2).toBe(0));\n` }); f.commit('test: add a case');
     const ask = finish(f, reviewed, post, ['--reviewed-base', mergeBase(f)]);
     expect(lineOf(ask.stdout, 'ROUTE')).toMatch(/ behavior=0 docs=0 metadata=0 tests=1 /);
-    expect([ask.status, lineOf(ask.stdout, 'STOP')]).toEqual([3, expect.stringContaining('STOP: test code changed since review in test/b.test.ts: one fix-check reviewer reads ')]);
+    expect([ask.status, lineOf(ask.stdout, 'STOP')]).toEqual([3, expect.stringContaining('STOP: test code changed since review in test/b.test.ts: one scoped reader (not a review round) reads ')]);
     const packet = /reads (\S+\.md), then/.exec(ask.stdout)![1]!;
     expect(fs.readFileSync(packet, 'utf8')).toContain("test('b is even'");
     const record = path.join(f.root, 'tests-reviewed.json');
@@ -464,7 +464,7 @@ describe('test-only and audit-requested edits after the docs audit (GST-391, gbr
       const pw = snapshot(w);
       w.write({ 'test/gate.test.ts': after }); w.commit(`test: ${name}`);
       const out = finish(w, rw, pw, ['--reviewed-base', mergeBase(w)]);
-      expect([name, out.status, lineOf(out.stdout, 'STOP')]).toEqual([name, 3, expect.stringContaining('STOP: test code changed since review in test/gate.test.ts: one fix-check reviewer reads ')]);
+      expect([name, out.status, lineOf(out.stdout, 'STOP')]).toEqual([name, 3, expect.stringContaining('STOP: test code changed since review in test/gate.test.ts: one scoped reader (not a review round) reads ')]);
     }
 
     const long = fx({}, { 'src/b.ts': 'export const b = 2;\n', 'test/b.test.ts': spec('b') });
@@ -472,7 +472,7 @@ describe('test-only and audit-requested edits after the docs audit (GST-391, gbr
     const plong = snapshot(long);
     long.write({ 'test/b.test.ts': spec('b') + Array.from({ length: 250 }, (_, i) => `test('case ${i}', () => expect(${i}).toBe(${i}));\n`).join('') }); long.commit('test: 250 cases');
     const tooLong = finish(long, rlong, plong, ['--reviewed-base', mergeBase(long)]);
-    expect([tooLong.status, lineOf(tooLong.stdout, 'STOP')]).toEqual([3, 'STOP: behavior, tests or build inputs changed since review (test/b.test.ts): insert 5–11.5 → 12–14 → 16 before Step 17 (stage 2.1)']);
+    expect([tooLong.status, lineOf(tooLong.stdout, 'STOP')]).toEqual([3, 'STOP: behavior, tests or build inputs changed since review (test/b.test.ts): insert 5–11.5 → 12–14 → 16 before Step 17; plan that Step 9 with gstack-review-plan --post-review, which at the round cap stops for the owner\'s grant of one scoped fix-check (stage 2.1)']);
     expect(tooLong.stdout).toContain('too large for the scoped review (over 200 lines in a section): test/b.test.ts');
 
     for (const [rel, route] of [['src/main/java/ABTest.java', 'behavior=1 docs=0 metadata=0 tests=0'], ['app/test_mode.py', 'behavior=1 docs=0 metadata=0 tests=0'], ['tests/test_mode.py', 'behavior=0 docs=0 metadata=0 tests=1']] as const) {
@@ -595,7 +595,7 @@ describe('preflight carry route for an adjacent base edit (GST-442)', () => {
     mergeMain(f, { 'lib/rows.js': src({ 5: 'exports.v5 = "five";', 6: 'exports.v6 = 600;' }) });
     const head = f.git('rev-parse', 'HEAD').stdout.trim();
     const view = path.join(f.root, 'view.json');
-    fs.writeFileSync(view, JSON.stringify({ body: placeReceiptFirst('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: reviewed, base: 'main', queue_mode: 'stamp-at-merge' } as any), headRefOid: head }));
+    fs.writeFileSync(view, JSON.stringify({ body: placeReceipt('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: reviewed, base: 'main', queue_mode: 'stamp-at-merge' } as any), headRefOid: head }));
     f.gh(`case "$1 $2" in "pr list") echo 9 ;; "pr view") cat '${view}' ;; *) exit 1 ;; esac`);
     const r = f.run(PREFLIGHT, ['--base', 'main']);
     expect(lineOf(r.stdout, 'CARRY')).toBe('CARRY: refused (RECEIPT_CARRY_SCOPED_REVIEW)');
@@ -603,6 +603,24 @@ describe('preflight carry route for an adjacent base edit (GST-442)', () => {
     expect(fs.existsSync(path.join(f.work, '.git', 'gstack', `scoped-review-${head.slice(0, 12)}.md`))).toBe(false);
     const wrote = f.run(path.join(BIN, 'gstack-ship-receipt'), ['carry', '--pr', '9', '--base', 'main']);
     expect([wrote.status, fs.existsSync(path.join(f.work, '.git', 'gstack', `scoped-review-${head.slice(0, 12)}.md`))]).toEqual([EXIT.refused, true]);
+  });
+
+  // Value: protects=the would-carry NEXT line names the push before the carry, since carry --pr refuses a HEAD that is not the
+  //   PR's pushed head (bin/gstack-ship-receipt), and the early push's secrets scan and CI wait come before the pregate;
+  //   fails_when=the NEXT line sends the agent from the pregate straight to carry; seam=gh; no_claim=the carry itself
+  test("preflight's would-carry route commits, pushes early and waits for CI before the pregate and the carry", () => {
+    const src = (edit: Record<number, string> = {}) => Array.from({ length: 12 }, (_, i) => edit[i + 1] ?? `exports.v${i + 1} = ${i + 1};`).join('\n') + '\n';
+    const f = fx({ 'lib/rows.js': src() }, { 'lib/rows.js': src({ 6: 'exports.v6 = 600;' }) });
+    const reviewed = f.git('rev-parse', 'HEAD').stdout.trim();
+    f.advanceBase({ 'lib/other.js': 'exports.other = 1;\n' });
+    mergeMain(f);
+    const head = f.git('rev-parse', 'HEAD').stdout.trim();
+    const view = path.join(f.root, 'view.json');
+    fs.writeFileSync(view, JSON.stringify({ body: placeReceipt('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: reviewed, base: 'main', queue_mode: 'stamp-at-merge' } as any), headRefOid: head }));
+    f.gh(`case "$1 $2" in "pr list") echo 9 ;; "pr view") cat '${view}' ;; *) exit 1 ;; esac`);
+    const r = f.run(PREFLIGHT, ['--base', 'main']);
+    expect(lineOf(r.stdout, 'CARRY')).toMatch(/^CARRY: would carry/);
+    expect(r.stdout).toMatch(/^NEXT: carry route \(Step 1\.4\): .*commit, gstack-ship-release push --branch \S+ --early, gstack-ci-carry wait --base main \(CI_CARRY: none is not a stop\), gstack-pregate --allow-repo-commands, then gstack-ship-receipt carry --pr 9 --base main --pregate/m);
   });
 
   // Value: protects=the dry run offers the scoped route only when nothing else would refuse the carry, so preflight never sends
@@ -616,7 +634,7 @@ describe('preflight carry route for an adjacent base edit (GST-442)', () => {
     mergeMain(f, { 'lib/rows.js': src({ 5: 'exports.v5 = "five";', 6: 'exports.v6 = 600;' }) });
     const head = f.git('rev-parse', 'HEAD').stdout.trim();
     const view = path.join(f.root, 'view.json');
-    fs.writeFileSync(view, JSON.stringify({ body: placeReceiptFirst('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: reviewed, base: 'main', queue_mode: 'stamp-at-merge', gstack_version: '1.0.0' } as any), headRefOid: head }));
+    fs.writeFileSync(view, JSON.stringify({ body: placeReceipt('## Summary\n\nProse.\n', { schema_version: 1, pr: 9, head: reviewed, base: 'main', queue_mode: 'stamp-at-merge', gstack_version: '1.0.0' } as any), headRefOid: head }));
     f.gh(`case "$1 $2" in "pr list") echo 9 ;; "pr view") cat '${view}' ;; *) exit 1 ;; esac`);
     const r = f.run(path.join(BIN, 'gstack-ship-receipt'), ['carry', '--pr', '9', '--base', 'main', '--dry-run']);
     expect([r.status, lineOf(r.stdout, 'CARRY')]).toEqual([EXIT.refused, 'CARRY: refused (RECEIPT_CARRY_REFUSED)']);

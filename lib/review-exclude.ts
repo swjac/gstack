@@ -11,7 +11,12 @@
  * stable reason. Applied patterns become `:(top,exclude,glob)` pathspecs on every reader,
  * and kept files under them come back through a second `:(top,literal)` command, because a
  * git exclude beats any positive pathspec. That second command is bounded by its argument
- * bytes: a pattern whose kept files would pass KEEP_ARG_MAX_BYTES is not applied.
+ * bytes: a pattern whose kept files would pass KEEP_ARG_MAX_BYTES on it is not applied.
+ *
+ * A file kept only for a secret line (a line that names a credential and carries a value, secretValueLine;
+ * no other reason, under an applied pattern, gate scan and consumer scan both read) is also listed in `excerpt`: pass readers
+ * get its matched lines in context (lib/review-secret-excerpt.ts, GST-1447) instead of the whole file, readSelection counts
+ * only that excerpt, and no reader's command names it, so it does not count toward the bound (GST-1967).
  *
  * readSelection reads one reader's diff once, with a timeout, and counts its bytes;
  * gstack-review-dispatch stops with REVIEW_DIFF_TOO_LARGE above REVIEW_DIFF_MAX_BYTES and
@@ -24,18 +29,23 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { collectLive } from './review-collect';
 import { DATA_PATH, classifyPath, isAgentProse, isDataConfig, isGatePath, type PathLines } from './review-depth';
-import { secretLine } from './review-targeted';
+import { scan } from './redact-engine';
+import { shannonEntropy } from './redact-patterns';
+import { KEY_NAME, SECRET_LINE, secretPath } from './review-risk';
+import { secretExcerpt } from './review-secret-excerpt';
 import { cmpVersion, parseVersion } from './version-source';
 import { REVIEW_EXCLUDE_KEY_VERSION, SHIP_POLICY_PATH, isUnavailable, policyUnavailableLine } from './ship-policy';
 import { loadPolicyAt } from './ship-policy-at';
 
 /** The most diff bytes one reader is handed (about 500K tokens); above it the pass stops instead of truncating. */
 export const REVIEW_DIFF_MAX_BYTES = 2_000_000;
-/** The most argument bytes the kept-file command may carry across all applied patterns (under Windows' 32,767-character command line). */
+/** The most argument bytes one git command, or the kept-file command a reader runs, may carry (under Windows' 32,767-character command line). */
 export const KEEP_ARG_MAX_BYTES = 24_000;
 /** How long one reader's `git diff` may run. */
 export const REVIEW_DIFF_TIMEOUT_MS = 120_000;
 const MAX_BUFFER = 256 * 1024 * 1024;
+const BLOB_BATCH_MAX_BYTES = 1024 * 1024;
+const BLOB_BATCH_BYTES = 64 * 1024 * 1024;
 export const KEPT_REASONS = ['policy-dir', 'gate-path', 'executable', 'agent-prose', 'config', 'gate-tagged', 'code', 'secret-line', 'named-by-code', 'consumer-scan-unavailable', 'gate-scan-unavailable', 'link'] as const;
 export type KeptReason = (typeof KEPT_REASONS)[number];
 
@@ -46,6 +56,8 @@ export interface ExcludeRecord {
 }
 export interface ActiveExclusion {
   state: 'active'; record: ExcludeRecord; excluded: Set<string>; specs: string[]; keep: string[];
+  /** The kept files (a subset of keep, as `:(top,literal)` items) whose only reason is a secret line: pass readers get an excerpt. */
+  excerpt: string[];
   kept: Array<{ path: string; reason: KeptReason }>; content: Record<ContentKind, number>; references: Array<{ prefix: string; files: string[] }>;
 }
 export type Exclusion =
@@ -71,12 +83,46 @@ export interface ExcludeInput {
 }
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
+
+/** Every credential name on a line: SECRET_LINE, and a key name given a value (`OPENAI_API_KEY=`, `"GH_TOKEN": `). */
+const SECRET_NAMES = [...SECRET_LINE, new RegExp(String.raw`\b${KEY_NAME}['"]?\s*[=:]`)].map(r => new RegExp(r.source, `${r.flags}g`));
+/** A variable reference (`$X`, `${X}`): a name, never a value. */
+const VARIABLE_REFERENCE = /\$\{?[A-Za-z_]\w*\}?/g;
+/** An unprefixed credential-shaped run (base64, base64url, a random token): 20+ characters mixing upper case, lower case and digits. */
+const VALUE_TOKEN = /[A-Za-z0-9+/_=-]{20,}/g;
+const valueToken = (text: string) => [...text.replace(VARIABLE_REFERENCE, ' ').matchAll(VALUE_TOKEN)].some(([t]) => /[A-Z]/.test(t) && /[a-z]/.test(t) && /\d/.test(t) && shannonEntropy(t) >= 3.5);
+/**
+ * Whether one changed line of excludable content holds a credential value, so its file is kept (GST-1967): it names a
+ * credential, and the credential scan (the secrets check, with #4157's env-read rule) finds a secret anywhere on the line,
+ * or a credential-shaped run follows a name within 200 characters. A line that only names one (`${OPENAI_API_KEY}`,
+ * `process.env.X`, `os.environ["X"]`, a keychain) holds no value.
+ */
+export function secretValueLine(p: string, line: string): boolean {
+  const ends = SECRET_NAMES.flatMap(r => [...line.matchAll(r)].map(m => m.index + m[0].length));
+  return ends.length > 0 && (ends.some(e => valueToken(line.slice(e, e + 200))) || scan(line, { processEnv: {}, sourcePath: p }).findings.some(f => f.category === 'secret' && f.severity !== 'LOW'));
+}
+/** The list_sha256 of a selection that holds no file: no pattern matched the range, so applied, excluded and kept are all empty. */
+export const EMPTY_LIST_SHA256 = sha256(JSON.stringify({ applied: [], excluded: [], kept: [] }));
+/** A recorded selection's list hash (applied patterns, excluded files, kept files with their reasons) when its digest is built from it; null otherwise. */
+export const recordedList = (r: Partial<Pick<ExcludeRecord, 'patterns_sha256' | 'list_sha256' | 'digest'>>) => (r.list_sha256 && r.digest === sha256(`${r.patterns_sha256}\n${r.list_sha256}`) ? r.list_sha256 : null);
 const shellQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 const literal = (p: string) => `:(top,literal)${p}`;
 const argBytes = (paths: Iterable<string>) => { let n = 0; for (const p of paths) n += Buffer.byteLength(shellQuote(literal(p))) + 1; return n; };
+/** `paths` in order, split so each chunk's literal pathspecs (`size` bytes each) stay within KEEP_ARG_MAX_BYTES (one path past it is its own chunk). */
+function argChunks(paths: readonly string[], size = (p: string) => argBytes([p])): string[][] {
+  const chunks: string[][] = [];
+  let bytes = Infinity;
+  for (const p of paths) {
+    const n = size(p);
+    if (bytes + n > KEEP_ARG_MAX_BYTES) { chunks.push([]); bytes = 0; }
+    chunks[chunks.length - 1]!.push(p);
+    bytes += n;
+  }
+  return chunks;
+}
 
-function git(root: string, args: string[], input?: string): { ok: boolean; status: number | null; out: string; err: string } {
-  const r = spawnSync('git', ['-c', 'core.quotePath=false', ...args], { cwd: root, input, encoding: 'utf8', timeout: 120_000, maxBuffer: MAX_BUFFER });
+function git(root: string, args: string[], input?: string, env?: NodeJS.ProcessEnv): { ok: boolean; status: number | null; out: string; err: string } {
+  const r = spawnSync('git', ['-c', 'core.quotePath=false', ...args], { cwd: root, input, env, encoding: 'utf8', timeout: 120_000, maxBuffer: MAX_BUFFER });
   return { ok: r.status === 0, status: r.status, out: r.stdout ?? '', err: (r.stderr ?? '').trim() };
 }
 
@@ -143,6 +189,8 @@ const nativeImage = (b: Buffer) => NATIVE_MAGIC.some(m => m.every((x, k) => b[k]
  * The claimed paths (git calls them binary under the branch's attributes or under none: bytesBinary) whose bytes hold a NUL
  * in their first 8,000 (git's own test), read from the head blob, the file on a live tree, or the old blob for a deletion.
  * A branch's .gitattributes can make git call a text file binary; only real bytes make it binary content here. A binary file that starts with executable image magic also goes in `native`.
+ * Blobs up to BLOB_BATCH_MAX_BYTES come through `git cat-file --batch` in groups of up to BLOB_BATCH_BYTES, so the git calls
+ * follow the bytes and not the file count; a larger blob, or one a batch did not return, is read alone (its first 8,000 bytes).
  */
 function binaryContent(i: ExcludeInput, files: ReadonlyMap<string, Matched>, claimed: ReadonlySet<string>, unread: Set<string>, native: Set<string>): Set<string> {
   const out = new Set<string>();
@@ -159,10 +207,29 @@ function binaryContent(i: ExcludeInput, files: ReadonlyMap<string, Matched>, cla
     const sha = real(m.newSha) ? m.newSha : real(m.oldSha) ? m.oldSha : '';
     if (sha) bySha.set(sha, [...(bySha.get(sha) ?? []), p]);
   }
+  const heads = new Map<string, Buffer>();
+  const sizes = bySha.size ? git(i.root, ['cat-file', '--batch-check=%(objectname) %(objectsize)'], [...bySha.keys()].join('\n') + '\n') : null;
+  const small = (sizes?.ok ? sizes.out.split('\n') : []).map(l => l.split(' ')).filter(([s, n]) => bySha.has(s ?? '') && Number(n) <= BLOB_BATCH_MAX_BYTES).map(([s, n]) => [s!, Number(n)] as const);
+  for (let k = 0; k < small.length;) {
+    const group: string[] = [];
+    let bytes = 0;
+    while (k < small.length && (!group.length || bytes + small[k]![1] <= BLOB_BATCH_BYTES)) { group.push(small[k]![0]); bytes += small[k]![1]; k++; }
+    const r = spawnSync('git', ['cat-file', '--batch'], { cwd: i.root, input: group.join('\n') + '\n', timeout: 120_000, maxBuffer: bytes + group.length * 200 });
+    if (r.status !== 0) continue;
+    let at = 0;
+    for (const sha of group) {
+      const nl = r.stdout.indexOf(10, at);
+      const [name, type, size] = nl < 0 ? [] : r.stdout.subarray(at, nl).toString().split(' ');
+      if (name !== sha || type !== 'blob' || size === undefined) break;
+      heads.set(sha, Buffer.from(r.stdout.subarray(nl + 1, nl + 1 + Math.min(Number(size), 8000))));
+      at = nl + 1 + Number(size) + 1;
+    }
+  }
   for (const [sha, paths] of bySha) {
-    const r = spawnSync('git', ['cat-file', 'blob', sha], { cwd: i.root, timeout: 30_000, maxBuffer: 8000 });
-    const read = r.status === 0 || (r.error as NodeJS.ErrnoException | undefined)?.code === 'ENOBUFS';
-    const head = (r.stdout ?? Buffer.alloc(0)).subarray(0, 8000);
+    const batched = heads.get(sha);
+    const r = batched ? null : spawnSync('git', ['cat-file', 'blob', sha], { cwd: i.root, timeout: 30_000, maxBuffer: 8000 });
+    const read = !r || r.status === 0 || (r.error as NodeJS.ErrnoException | undefined)?.code === 'ENOBUFS';
+    const head = batched ?? (r?.stdout ?? Buffer.alloc(0)).subarray(0, 8000);
     for (const p of paths) if (!read) unread.add(p); else sniff(p, head);
   }
   return out;
@@ -178,15 +245,7 @@ function binaryContent(i: ExcludeInput, files: ReadonlyMap<string, Matched>, cla
 function attributeBinaryLines(i: ExcludeInput, paths: readonly string[], unread: Set<string>): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   const range = i.head ? [i.mergeBase, i.head] : [i.mergeBase];
-  const chunks: string[][] = [];
-  let bytes = Infinity;
-  for (const p of [...paths].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b)))) {
-    const n = argBytes([p]);
-    if (bytes + n > KEEP_ARG_MAX_BYTES) { chunks.push([]); bytes = 0; }
-    chunks[chunks.length - 1]!.push(p);
-    bytes += n;
-  }
-  for (const chunk of chunks) {
+  for (const chunk of argChunks([...paths].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))))) {
     const r = git(i.root, ['diff', '--text', '--no-textconv', '--no-ext-diff', '--no-renames', '--src-prefix=a/', '--dst-prefix=b/', '-U0', ...range, '--', ...chunk.map(literal)]);
     const sections = r.ok ? r.out.split(/^(?=diff --git )/m).filter(s => s.startsWith('diff --git ')) : [];
     const aligned = sections.length === chunk.length && chunk.every((p, k) => /["\\\x00-\x1f\x7f]/.test(p) || sections[k]!.startsWith(`diff --git a/${p} b/${p}\n`));
@@ -215,7 +274,7 @@ const BINARY_CONTENT_EXT = /\.(?:png|jpe?g|gif|webp|bmp|ico|avif|tiff?|heic|heif
 /** Why a matched file is kept by its path, mode and lines alone; null for content the policy may exclude. A binary file readers would only see as "Binary files differ" is content unless its directory, mode, gate tags, extension or magic keep it. */
 function pathReason(i: ExcludeInput, p: string, m: Matched, binary: ReadonlySet<string>, native: ReadonlySet<string>): KeptReason | null {
   if (/^\.(gstack|github)\//.test(p)) return 'policy-dir';
-  if (isGatePath(p)) return 'gate-path';
+  if (isGatePath(p) || secretPath(p, i.added[p] ?? [])) return 'gate-path';
   if (m.oldMode === '100755' || m.newMode === '100755') return 'executable';
   if ([m.oldMode, m.newMode].some(x => x === '120000' || x === '160000')) return 'link';
   if (i.gateTagged?.has(p)) return 'gate-tagged';
@@ -223,7 +282,7 @@ function pathReason(i: ExcludeInput, p: string, m: Matched, binary: ReadonlySet<
   if (isAgentProse(p)) return 'agent-prose';
   if (isDataConfig(p)) return 'config';
   if (contentKind(i, p, binary) === null) return 'code';
-  if ((i.added[p] ?? []).some(secretLine)) return 'secret-line';
+  if ((i.added[p] ?? []).some(l => secretValueLine(p, l))) return 'secret-line';
   return null;
 }
 
@@ -231,7 +290,15 @@ function pathReason(i: ExcludeInput, p: string, m: Matched, binary: ReadonlySet<
 const consumer = (i: ExcludeInput, f: string, candidates: ReadonlySet<string>) =>
   !candidates.has(f) && !f.startsWith('.gstack/tmp/') && contentKind(i, f, new Set()) === null;
 
-/** An uncapped `git grep -F -o -f` of fixed strings at the head (or the working tree) and `revs`: string -> the consumer files holding it; null when git grep failed. */
+/**
+ * An uncapped `git grep -F -o -f` of fixed strings at the head (or the working tree) and `revs`: string -> the consumer files
+ * holding it; null when git could not list a tree, a consumer's name did not survive UTF-8 decoding, or git could not build
+ * the scratch index or grep it (a timeout included). Each tree's file list is filtered to consumers first, so the data under
+ * the patterns is never read (GST-1435: a whole-tree grep for 4,354 candidate paths through 30 MB of receipts ran 278 s), and
+ * the consumers go into a scratch index that one git grep reads, so the git calls stay fixed however many files there are
+ * (GST-1442: 363 chunked greps over a 192k-file tree ran 132 s). On a live tree, an entry git reads from its blob
+ * (skip-worktree or assume-unchanged) goes into a second index grepped with --cached, as git grep itself would read it.
+ */
 function grepFixed(i: ExcludeInput, strings: readonly string[], candidates: ReadonlySet<string>, revs: readonly string[]): Map<string, Set<string>> | null {
   const found = new Map<string, Set<string>>();
   if (!strings.length) return found;
@@ -239,18 +306,35 @@ function grepFixed(i: ExcludeInput, strings: readonly string[], candidates: Read
   try {
     const list = path.join(dir, 'patterns');
     fs.writeFileSync(list, strings.join('\n') + '\n');
-    const runs = [i.head ? { at: i.head, args: [i.head, '--'] } : { at: '', args: ['--'] }, ...revs.map(rev => ({ at: rev, args: [rev, '--'] }))];
-    for (const run of runs) {
-      const r = git(i.root, ['grep', '-I', '-F', '-o', '--null', '--no-line-number', '--no-column', '--no-color', '-f', list, ...run.args]);
-      if (r.status !== 0 && r.status !== 1) return null;
-      for (const line of r.out.split('\n')) {
-        const parts = line.split('\0');
-        const where = parts[0];
-        const match = parts.length > 1 ? parts[parts.length - 1] : undefined;
-        if (!where || !match) continue;
-        const file = run.at ? where.slice(run.at.length + 1) : where;
-        if (!consumer(i, file, candidates)) continue;
-        (found.get(match) ?? found.set(match, new Set()).get(match)!).add(file);
+    let n = 0;
+    for (const at of [i.head ?? '', ...revs]) {
+      const ls = git(i.root, at ? ['ls-tree', '-r', '-z', at] : ['ls-files', '-s', '-v', '-z']);
+      if (!ls.ok) return null;
+      const worktree: string[] = [];
+      const cached: string[] = [];
+      for (const entry of ls.out.split('\0')) {
+        const tab = entry.indexOf('\t');
+        const f = entry.slice(tab + 1);
+        if (tab < 0 || !consumer(i, f, candidates)) continue;
+        if (f.includes('\uFFFD')) return null;
+        const meta = entry.slice(0, tab).split(' ');
+        if (at) { if (meta[1] === 'blob') cached.push(`${meta[0]} ${meta[2]}\t${f}`); continue; }
+        const [tag = '', mode, sha, stage] = meta;
+        (tag === 'S' || tag !== tag.toUpperCase() ? cached : worktree).push(`${mode} ${sha} ${stage}\t${f}`);
+      }
+      for (const [entries, flags] of [[worktree, []], [cached, ['--cached']]] as const) {
+        if (!entries.length) continue;
+        const env = { ...process.env, GIT_INDEX_FILE: path.join(dir, `index-${n++}`) };
+        if (!git(i.root, ['update-index', '-z', '--index-info'], entries.join('\0') + '\0', env).ok) return null;
+        const r = git(i.root, ['grep', ...flags, '-I', '-F', '-o', '--null', '--no-line-number', '--no-column', '--no-color', '-f', list], undefined, env);
+        if (r.status !== 0 && r.status !== 1) return null;
+        for (const line of r.out.split('\n')) {
+          const parts = line.split('\0');
+          const file = parts[0];
+          const match = parts.length > 1 ? parts[parts.length - 1] : undefined;
+          if (!file || !match) continue;
+          (found.get(match) ?? found.set(match, new Set()).get(match)!).add(file);
+        }
       }
     }
     return found;
@@ -262,7 +346,8 @@ function grepFixed(i: ExcludeInput, strings: readonly string[], candidates: Read
  * nothing); `head-only` when only the head does (a notice, never applied); `refused` when the base policy cannot be read or
  * does not validate, or git cannot list the matches; `active` otherwise. Named-by-code keeps a file only when a kept code
  * file names its full repository path (never its basename: receipt trees reuse result.json thousands of times); a git grep
- * failure keeps every candidate (consumer-scan-unavailable), and so does an unknown gate scan (gate-scan-unavailable).
+ * failure keeps every candidate (consumer-scan-unavailable), and so does an unknown gate scan (gate-scan-unavailable) or a
+ * matched text file with changed lines the collector holds no added lines for (GST-1451: it is unread, so it fails closed).
  */
 export function reviewExclude(i: ExcludeInput): Exclusion {
   const load = loadPolicyAt(i.root, i.baseSha, i.ref);
@@ -281,15 +366,19 @@ export function reviewExclude(i: ExcludeInput): Exclusion {
   const claimed = i.perPath.filter(e => e.binary && sel.files.has(e.path)).map(e => e.path);
   const binary = binaryContent(i, sel.files, new Set([...claimed, ...(bytesBinary(i, patterns) ?? sel.files.keys())]), unread, native);
   const text = { ...i, added: { ...i.added, ...attributeBinaryLines(i, claimed.filter(p => !binary.has(p) && !unread.has(p)), unread) } };
+  const collected = new Map(i.perPath.map(e => [e.path, e]));
+  const unseen = (p: string) => { const e = collected.get(p); return !e || (!e.binary && e.lines > 0 && !(p in text.added)); };
   const reasons = new Map<string, KeptReason | null>();
-  for (const [p, m] of sel.files) reasons.set(p, unread.has(p) ? 'consumer-scan-unavailable' : pathReason(text, p, m, binary, native));
+  for (const [p, m] of sel.files) reasons.set(p, unread.has(p) ? 'consumer-scan-unavailable' : pathReason(text, p, m, binary, native) ?? (unseen(p) ? 'consumer-scan-unavailable' : null));
   const candidates = new Set([...reasons].filter(([, r]) => r === null).map(([p]) => p));
-  const named = grepFixed(i, [...candidates].filter(p => !p.includes('\n')), candidates, [i.mergeBase]);
+  const secretOnly = [...reasons].filter(([p, r]) => r === 'secret-line' && !p.includes('\n')).map(([p]) => p);
+  const named = grepFixed(i, [...candidates, ...secretOnly].filter(p => !p.includes('\n')), new Set([...candidates, ...secretOnly]), [i.mergeBase]);
   for (const p of candidates) {
     if (i.gateTagged === null) reasons.set(p, 'gate-scan-unavailable');
     else if (named === null || p.includes('\n')) reasons.set(p, 'consumer-scan-unavailable');
     else if (named.has(p)) reasons.set(p, 'named-by-code');
   }
+  const excerptable = new Set(i.gateTagged === null || named === null ? [] : secretOnly.filter(p => !named.has(p)));
   const applied: string[] = [];
   const skipped: ExcludeRecord['skipped'] = [];
   const keep = new Set<string>();
@@ -297,12 +386,13 @@ export function reviewExclude(i: ExcludeInput): Exclusion {
     const hit = sel.byPattern.get(p) ?? [];
     if (!hit.some(f => reasons.get(f) === null)) continue;
     const kept = hit.filter(f => reasons.get(f) !== null);
-    const bytes = argBytes(new Set([...keep, ...kept]));
+    const bytes = argBytes([...new Set([...keep, ...kept])].filter(f => !excerptable.has(f)));
     if (bytes > KEEP_ARG_MAX_BYTES) { skipped.push({ pattern: p, kept: kept.length, bytes }); continue; }
     applied.push(p);
     for (const f of kept) keep.add(f);
   }
   const excluded = new Set(applied.flatMap(p => (sel.byPattern.get(p) ?? []).filter(f => reasons.get(f) === null)));
+  const excerpt = [...excerptable].filter(p => keep.has(p)).sort();
   const keptList = [...reasons].filter(([, r]) => r !== null).map(([p, r]) => ({ path: p, reason: r! })).sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
   const sortedExcluded = [...excluded].sort();
   const content: Record<ContentKind, number> = { binary: 0, data: 0, docs: 0, log: 0 };
@@ -317,7 +407,7 @@ export function reviewExclude(i: ExcludeInput): Exclusion {
     gate_tagged: keptList.filter(k => k.reason === 'gate-tagged').map(k => k.path), patterns_sha256, list_sha256, digest: sha256(`${patterns_sha256}\n${list_sha256}`),
   };
   return {
-    state: 'active', record, excluded, specs: applied.map(p => `:(top,exclude,glob)${p}`), keep: [...keep].sort().map(literal), kept: keptList, content,
+    state: 'active', record, excluded, specs: applied.map(p => `:(top,exclude,glob)${p}`), keep: [...keep].sort().map(literal), excerpt: excerpt.map(literal), kept: keptList, content,
     references: prefixes.filter(p => refs.has(p)).map(p => ({ prefix: p, files: [...refs.get(p)!].sort() })),
   };
 }
@@ -340,6 +430,7 @@ export function excludeLines(x: Exclusion, base: string): string[] {
   const out = [`REVIEW_EXCLUDE: patterns=${r.applied.length}/${r.patterns.length} excluded=${r.excluded} bytes=${r.excluded_bytes} kept=${r.kept} content=${Object.entries(x.content).filter(([, n]) => n).map(([k, n]) => `${k}:${n}`).join(',') || 'none'} source=${r.source} digest=${r.digest}${skipped}${r.unmatched.length ? ` unmatched=${r.unmatched.join(',')}` : ''}`];
   for (const k of x.kept.slice(0, 20)) out.push(`REVIEW_EXCLUDE_KEPT: ${k.reason} ${k.path}`);
   if (x.kept.length > 20) out.push(`REVIEW_EXCLUDE_KEPT: +${x.kept.length - 20} more (gstack-review-plan --json lists every kept file)`);
+  if (x.excerpt.length) out.push(`REVIEW_EXCLUDE_EXCERPT: ${x.excerpt.length} kept files hold no keep reason but a secret line; gstack-review-dispatch pass gives readers their matched lines in context, not the whole files, and DIFF_KEEP leaves them out`);
   for (const ref of x.references) out.push(`REVIEW_EXCLUDE_REFERENCE: ${ref.prefix} is named by ${ref.files.slice(0, 3).join(', ')}${ref.files.length > 3 ? ` (+${ref.files.length - 3} more)` : ''}; the files stay excluded, so readers see that code without the files it reads (REVIEW_EXCLUDE_REFERENCE)`);
   return out;
 }
@@ -359,29 +450,52 @@ export function parseTail(tail: string | undefined): string[] {
 }
 
 export type ReaderDiff =
-  | { ok: true; text: string; bytes: number; byDir: Array<[string, number]> }
+  | { ok: true; text: string; bytes: number; byDir: Array<[string, number]>; excerpt?: string; whole?: string[] }
   | { ok: false; reason: 'timeout' | 'git-exit'; exit: number | null; stderr: string; timeoutMs: number };
 
-/** One reader's selection read once: `git diff <base> [-- pathspecs]`, then the kept-file command, with its bytes per top directory. */
-export function readSelection(root: string, diffBase: string, pathspecs: readonly string[], keep: readonly string[] = [], timeoutMs = REVIEW_DIFF_TIMEOUT_MS): ReaderDiff {
+/** The excerpt of one `git diff --text` over the excerpt files; any throw sends every file whole (fail closed). */
+function excerptOf(out: string, specs: readonly string[]): { text: string; whole: string[]; wholeText: string; files: Array<{ path: string; text: string }> } {
+  const paths = specs.map(s => s.replace(/^:\(top,literal\)/, ''));
+  try {
+    if (specs.some(s => !s.startsWith(':(top,literal)'))) throw new Error('an excerpt item is not a literal pathspec');
+    const x = secretExcerpt(out, paths);
+    return { text: x.text, files: x.files, whole: x.whole.map(literal), wholeText: x.wholeText };
+  } catch { return { text: '', files: [], whole: [...specs], wholeText: out }; }
+}
+
+/**
+ * One reader's selection read once: `git diff <base> [-- pathspecs]`, then the kept-file command, with its bytes per top
+ * directory. The kept and excerpt files are read in git calls of at most KEEP_ARG_MAX_BYTES of pathspecs each, so however many
+ * there are no command passes Windows' limit. `excerpt` files (ActiveExclusion.excerpt) are read with `git diff --text` and count as their secret-line
+ * excerpt, appended to `text` and returned as `excerpt`; a file the excerpt could not be built for counts whole, its
+ * section joins `text` and its item is listed in `whole` for the caller's keep command.
+ */
+export function readSelection(root: string, diffBase: string, pathspecs: readonly string[], keep: readonly string[] = [], excerpt: readonly string[] = [], timeoutMs = REVIEW_DIFF_TIMEOUT_MS): ReaderDiff {
   let text = '';
-  for (const specs of [pathspecs, ...(keep.length ? [keep] : [])]) {
+  let raw = '';
+  let full = false;
+  const size = (s: string) => Buffer.byteLength(shellQuote(s)) + 1;
+  const textFlags = ['--text', '--no-textconv', '--src-prefix=a/', '--dst-prefix=b/'];
+  const reads: Array<[readonly string[], string[]]> = [[pathspecs, []], ...argChunks(keep, size).map(c => [c, []] as [readonly string[], string[]]),
+    ...argChunks(excerpt, size).map(c => [c, textFlags] as [readonly string[], string[]])];
+  for (const [specs, flags] of reads) {
     const tail = specs.length ? (specs[0] === '--' ? specs : ['--', ...specs]) : [];
-    const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', diffBase, ...tail], { cwd: root, encoding: 'utf8', timeout: timeoutMs, maxBuffer: MAX_BUFFER });
+    const r = spawnSync('git', ['-c', 'core.quotePath=false', 'diff', '--no-color', '--no-ext-diff', ...flags, diffBase, ...tail], { cwd: root, encoding: 'utf8', timeout: timeoutMs, maxBuffer: MAX_BUFFER });
     const code = (r.error as NodeJS.ErrnoException | undefined)?.code;
-    if (code === 'ENOBUFS') { text += r.stdout ?? ''; break; }
+    if (code === 'ENOBUFS') { text += raw + (r.stdout ?? ''); full = true; break; }
     if (code === 'ETIMEDOUT' || (r.signal && r.status === null)) return { ok: false, reason: 'timeout', exit: null, stderr: r.stderr ?? '', timeoutMs };
     if (r.status !== 0) return { ok: false, reason: 'git-exit', exit: r.status, stderr: r.stderr ?? '', timeoutMs };
-    text += r.stdout;
+    if (flags.length) raw += r.stdout; else text += r.stdout;
   }
+  const ex = excerpt.length && !full ? excerptOf(raw, excerpt) : undefined;
+  if (ex) text += ex.wholeText;
   const byDir = new Map<string, number>();
+  const add = (file: string, bytes: number) => { const dir = file.includes('/') ? file.split('/')[0]! : '(root)'; byDir.set(dir, (byDir.get(dir) ?? 0) + bytes); };
   const starts = [...text.matchAll(/^diff --git a\/(\S+)/gm)];
-  starts.forEach((m, k) => {
-    const end = k + 1 < starts.length ? starts[k + 1]!.index! : text.length;
-    const dir = m[1]!.includes('/') ? m[1]!.split('/')[0]! : '(root)';
-    byDir.set(dir, (byDir.get(dir) ?? 0) + Buffer.byteLength(text.slice(m.index!, end)));
-  });
-  return { ok: true, text, bytes: Buffer.byteLength(text), byDir: [...byDir].sort((a, b) => b[1] - a[1]) };
+  starts.forEach((m, k) => add(m[1]!, Buffer.byteLength(text.slice(m.index!, k + 1 < starts.length ? starts[k + 1]!.index! : text.length))));
+  for (const f of ex?.files ?? []) add(f.path, Buffer.byteLength(f.text));
+  const all = ex?.text ? `${text}${text && !text.endsWith('\n') ? '\n' : ''}${ex.text}` : text;
+  return { ok: true, text: all, bytes: Buffer.byteLength(all), byDir: [...byDir].sort((a, b) => b[1] - a[1]), ...(ex ? { excerpt: ex.text, whole: ex.whole } : {}) };
 }
 
 /** Credential-bearing remote URLs and scp-style remotes out of git's stderr. */

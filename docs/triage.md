@@ -7,6 +7,21 @@ feature requests into TODOS.md themes with a "not rejected" note, and reporters
 still saw a closed issue with no fix. Those were reopened on 2026-10-25 under
 the `parked` label, and this page is the rule going forward.
 
+An agent triaging for the maintainer may post every comment this page describes,
+tag people, request reviews and leave short notes for outside authors, but only
+under its bot identity (`capy-ai[bot]` on Capy), never the maintainer's own
+GitHub account. On Capy, comment and tag people only through Capy's PR comment
+tool (`tools.pr.comment`), and request reviews only through `tools.pr.edit`;
+both act as `capy-ai[bot]`. Never comment, tag or request a review with
+`gh pr comment`, `gh issue comment`, `gh api` or `gstack-post` on a Capy
+machine: `gh` there runs as the maintainer's own account. Elsewhere, comment through `gh` only
+when `gh api user --jq .type` prints `Bot`. A comment no bot-identity tool can
+post is a draft for the maintainer instead. GitHub comments are the only way an
+agent reaches people for the maintainer: it never sends them email, chat
+messages, DMs or social posts, and never reads the maintainer's inbox (Garry,
+2026-11-04: "never send emails or messages to human beings on my behalf ever";
+amended 2026-11-05: "Oh you can leave comments on GitHub").
+
 ## The three states
 
 | State | Meaning | How it looks on GitHub |
@@ -55,7 +70,7 @@ label separately with `gh issue edit <n> --add-label <label>`.
 A duplicate of a parked issue is still a duplicate: close it with the link,
 and the parked issue's comment or TODOS.md entry credits both reporters. A
 report that no longer reproduces on current main closes as fixed when a commit,
-PR or version explains why (cite it, as `/investigate --backlog` does with
+PR or version explains why (cite it as
 `already_fixed <commit>`); when nothing does, it closes as won't fix with the
 version it was checked against and an invitation to reopen with a repro.
 

@@ -43,11 +43,16 @@ function firstLine(file: string): string {
   } finally { fs.closeSync(fd); }
 }
 
-const BUN_WORD = /(^|[\s;&|({`"']|\$\()(bun|"\$\{?BUN(?:_[A-Z]+)?\}?"|\$\{?BUN(?:_[A-Z]+)?\}?)(?=[ \t])/g;
+const BUN_WORD = /(^|[\s;&|({`"']|\$\()(bun|"\$\{?\w*(?:BUN|[Bb]un)\w*\}?"|\$\{?\w*(?:BUN|[Bb]un)\w*\}?)(?=[ \t])/g;
+/** Any variable at a command position (`"$RUNNER" x.ts`, `OUT=$("$RUNNER" ...)`, `case) "$RUNNER" ...`); it is a Bun when it launches a TypeScript file. */
+const VAR_COMMAND = /(^\s*|[;&|({)`!]\s*|\$\(\s*|\b(?:then|do|else|exec)\s+)("\$\{?[A-Za-z_]\w*\}?"|\$\{?[A-Za-z_]\w*\}?)(?=[ \t])/g;
+
+const afterFlags = (rest: string) => rest.replace(/^\s+/, '').replace(/^(?:--(?:no-env-file|cwd[= ]\S+|config(?:=\S*|\s+\S+))\s+)*/, '');
+const runsTypeScript = (rest: string) => /^(?:run\s+)?["']?[^\s"'|;&)]*\.(?:ts|tsx|mts)(?:["'\s)|;&\\`]|$)/.test(afterFlags(rest));
 
 /** Whether the text after a `bun` word starts a program: -e/-p, a script path, `run <var>` or a bin path. A package script (`bun run build`) is not one. */
 function runsCode(rest: string): boolean {
-  const r = rest.replace(/^\s+/, '').replace(/^(?:--(?:no-env-file|cwd[= ]\S+|config(?:=\S*|\s+\S+))\s+)*/, '');
+  const r = afterFlags(rest);
   return /^(?:run\s+)?(?:-e|-p|--eval|--print)(?:\s|=|$)/.test(r)
     || /^(?:run\s+)?["']?[^\s"'|;&)]*\.(?:ts|js|mjs|cjs|tsx)(?:["'\s)|;&\\`]|$)/.test(r)
     || /^run\s+["']?\$\{?[A-Za-z_]/.test(r)
@@ -63,6 +68,12 @@ function unisolatedBunCalls(line: string, flags = FLAGS): string[] {
     if (/\bln\s+-\w+\s+$/.test(line.slice(0, at))) continue;
     const rest = line.slice(at + m[2]!.length);
     if (!rest.startsWith(` ${flags}`) && runsCode(rest)) out.push(line.slice(at, at + 80));
+  }
+  for (const m of line.matchAll(VAR_COMMAND)) {
+    const at = m.index! + m[1]!.length;
+    if (new RegExp(BUN_WORD.source).test(m[2]!)) continue;
+    const rest = line.slice(at + m[2]!.length);
+    if (!rest.startsWith(` ${flags}`) && runsTypeScript(rest)) out.push(line.slice(at, at + 80));
   }
   return out;
 }
@@ -111,8 +122,7 @@ describe('GSTA-56: gstack never takes configuration from the audited repository'
       'scripts/eval-compare.ts',
       'scripts/eval-summary.ts',
       'scripts/garry-output-comparison.ts',
-      'scripts/judge-controls.ts',
-      'scripts/measure-journal-read.ts',
+      'crew/scripts/measure-journal-read.ts',
     ];
     expect(scripts.filter(f => firstLine(f) !== ISOLATED_SHEBANG)).toEqual([]);
   });
@@ -127,6 +137,12 @@ describe('GSTA-56: gstack never takes configuration from the audited repository'
       '"$BUN" -e \'1\'',
       'bun --no-env-file run "$X/bin/gstack-design-detect.ts"',
       'running=$(bun -p process.execPath)',
+      'PINS_OUT=$("$RUNNER" "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT" 2>/dev/null)',
+      '    parser) "$RUNNER" "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT" --bun "$1" | grep -q x ;;',
+      'node_accept() { ! "$RUNNER" "$ROOT/bin/gstack-runtime-pins.ts" --node "$1"; }',
+      '"$RUNNER" run "$ROOT/bin/gstack-runtime-pins.ts"',
+      'v=$("$REC_BUN" -e "console.log(1)")',
+      '"$_bun" run "$X/bin/gstack-design-detect"',
     ]) expect(unisolatedBunCalls(bad)).not.toEqual([]);
     for (const ok of [
       `bun ${FLAGS} run ~/.claude/skills/gstack/bin/gstack-render.ts x.html`,
@@ -137,6 +153,13 @@ describe('GSTA-56: gstack never takes configuration from the audited repository'
       '# bun run scripts/x.ts in a comment',
       'say "installing bun $WANT from its release archive"',
       'ln -sf bun "$HOME/.bun/bin/bunx"',
+      `PINS_OUT=$("$RUNNER" ${FLAGS} "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT")`,
+      '[ -f "$ROOT/bin/gstack-runtime-pins.ts" ] && echo yes',
+      'cp "$SRC" "$DEST/pins.ts"',
+      'echo "$X" a.ts',
+      '"$NODE" -e "console.log(1)"',
+      '_got=$("$RUNNER" --version 2>/dev/null | head -1)',
+      'out=$("$GSTACK_BUN_CONFIG")',
     ]) expect(unisolatedBunCalls(ok)).toEqual([]);
   });
 
@@ -151,6 +174,7 @@ describe('GSTA-56: gstack never takes configuration from the audited repository'
       `printf x | bun ${SHELL_FLAGS} -e "console.log(1)"`,
       `exec bun ${SHELL_FLAGS} "$HERE/question-log-hook.ts"`,
       `probe_cmd="bun ${SHELL_FLAGS} --eval 'import x from \\"y\\"'"`,
+      `PINS_OUT=$("$RUNNER" ${SHELL_FLAGS} "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT")`,
     ]) expect(unisolatedBunCalls(ok, SHELL_FLAGS)).toEqual([]);
   });
 
@@ -186,7 +210,7 @@ describe('GSTA-56: gstack never takes configuration from the audited repository'
     };
     const offenders: string[] = [];
     for (const f of TRACKED) {
-      if (f.startsWith('.github/') || f.startsWith('scripts/') || /\.test\.ts$|^test-setup\.ts$/.test(f) || EXEMPT[f]) continue;
+      if (f.startsWith('.github/') || f.startsWith('scripts/') || f.startsWith('crew/scripts/') || /\.test\.ts$|^test-setup\.ts$/.test(f) || EXEMPT[f]) continue;
       if (!f.endsWith('.ts') && !/^#!.*\bbun\b/.test(firstLine(f))) continue;
       const src = fs.readFileSync(path.join(ROOT, f), 'utf8');
       for (const m of src.matchAll(SPAWN_BUN)) {

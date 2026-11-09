@@ -167,8 +167,34 @@ function looksLikeWallet(span: string): boolean {
     const body = span.slice(2).toLowerCase();
     return !/^(.)\1{39}$/.test(body);
   }
-  // bech32 / base58 — length sanity only
+  if (span.startsWith("bc1")) return bech32ChecksumValid(span);
+  // base58 — length sanity only
   return span.length >= 26 && span.length <= 62;
+}
+
+/**
+ * A bc1 address is bech32 (BIP 173) or bech32m (BIP 350): `bc`, the separator `1`, then data from a 32-letter alphabet
+ * with no `1`, `b`, `i` or `o`, ending in a six-letter checksum. A git sha that starts with `bc1` read as a wallet and
+ * was redacted out of `<sha>..<sha>` (Free Tests 41715139988, test/cso-cli.test.ts); the alphabet in the regex refuses
+ * most such shas, and the checksum, which a random string passes about once in 500 million tries, refuses the rest. Every real
+ * address carries a valid checksum, so none is lost.
+ */
+const BECH32_ALPHABET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const BECH32_GENERATOR = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+function bech32ChecksumValid(address: string): boolean {
+  const sep = address.lastIndexOf("1");
+  const hrp = [...address.slice(0, sep)].map((c) => c.charCodeAt(0));
+  const data = [...address.slice(sep + 1)].map((c) => BECH32_ALPHABET.indexOf(c));
+  if (sep < 1 || data.length < 6 || data.some((v) => v < 0)) return false;
+  let chk = 1;
+  for (const v of [...hrp.map((c) => c >> 5), 0, ...hrp.map((c) => c & 31), ...data]) {
+    const top = chk >>> 25;
+    chk = ((chk & 0x1ffffff) << 5) ^ v;
+    BECH32_GENERATOR.forEach((g, i) => {
+      if ((top >>> i) & 1) chk ^= g;
+    });
+  }
+  return chk === 1 || chk === 0x2bc830a3;
 }
 
 // Compact log/backup stamps (`20260727202423` = YYYYMMDDHHMMSS) are bare digit
@@ -393,6 +419,22 @@ export function isCiRunIdentifier(span: string, match: RegExpExecArray): boolean
 }
 
 /**
+ * The owner's grant of one scoped fix-check is recorded as `review_loop_grant <stop head sha>`, and an accepted stop as
+ * `review_loop_exception <sha>` (docs/review-policy.md). About one 12-character sha in 300 is all digits
+ * (`367120488513`), and pii.phone.e164 read it as a phone number, so gstack-approvals refused the owner's grant
+ * (APPROVAL_RECORD_SECRET; Free Tests 41667825418, 41766865679). Only the position decides: a digits-only span right
+ * after one of those two tokens and a space, `=` or `:`. The same digits anywhere else, or a number with a `+`,
+ * spaces or dashes after the token, still report.
+ */
+const REVIEW_LOOP_SHA_BEFORE = /\breview_loop_(?:grant|exception)(?:[ \t]+|[ \t]*[:=][ \t]*)$/;
+function isReviewLoopSha(span: string, match: RegExpExecArray): boolean {
+  if (!/^\d+$/.test(span)) return false;
+  const input = match.input ?? "";
+  const { start } = spanBounds(match);
+  return REVIEW_LOOP_SHA_BEFORE.test(input.slice(Math.max(0, start - 40), start));
+}
+
+/**
  * A four-part version (MAJOR.MINOR.PATCH.BUILD: .NET assembly versions,
  * gstack's own VERSION) is byte-for-byte a dotted quad, and `1.128.1.0` is a
  * public address, so `"version": "1.128.1.0"` raised pii.ip_public on every
@@ -430,6 +472,29 @@ function declaredAt(input: string, start: number, end: number, range: boolean): 
 export function isDeclaredVersion(match: RegExpExecArray): boolean {
   const { start, end } = spanBounds(match);
   return declaredAt(match.input ?? "", start, end, true);
+}
+
+/**
+ * A quad written to or read from a VERSION file, or set beside a semver (GST-2047): the file's name, alone or ending a
+ * path, or a three-part version (`v1.97.2`, `1.98.0-rc.1`) within a short gap of the quad on the same line
+ * (`path.join(dir, "VERSION"), "1.98.0.0\n"`, `echo 1.98.0.0 > VERSION`, `v1.97.2 to 1.98.0.0`). The gap holds only
+ * quotes, brackets, commas, arrows, spaces, a `\n` escape or the word `to`, so a quad set apart by any other word
+ * (`VERSION bumped; the DNS server 8.8.8.8`, `node 22.11.0 talks to 8.8.8.8`) still reports, and so does a quad
+ * next to another quad. A file named VERSION that holds only the quad is one too; a VERSION file with any other line is
+ * not a whole-file version (#2856), so each of its quads reports.
+ */
+const VERSION_GAP = String.raw`(?:[^A-Za-z0-9\n]|\\[nrt]|\bto\b){0,12}`;
+const VERSION_NEIGHBOUR = String.raw`(?:(?<![\w.-])(?:[\w.-]+\/)*VERSION(?![\w.-])|(?<![\w.])v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?(?![\w.-]))`;
+const VERSION_NEIGHBOUR_BEFORE = new RegExp(VERSION_NEIGHBOUR + VERSION_GAP + "$");
+const VERSION_NEIGHBOUR_AFTER = new RegExp("^" + VERSION_GAP + VERSION_NEIGHBOUR);
+export function isVersionContext(match: RegExpExecArray, sourcePath?: string): boolean {
+  const input = match.input ?? "";
+  const { start, end } = spanBounds(match);
+  const lineStart = input.lastIndexOf("\n", start - 1) + 1;
+  const lineEnd = input.indexOf("\n", end);
+  const line = input.slice(lineStart, lineEnd < 0 ? input.length : lineEnd);
+  if (sourcePath && /(?:^|[\\/])VERSION$/.test(sourcePath) && input.trim() === input.slice(start, end)) return true;
+  return VERSION_NEIGHBOUR_BEFORE.test(input.slice(Math.max(lineStart, start - 80), start)) || VERSION_NEIGHBOUR_AFTER.test(line.slice(end - lineStart, end - lineStart + 80));
 }
 
 // ── Placeholder suppression (per-matched-span, NOT per-line) ─────────────────
@@ -648,12 +713,43 @@ function urlPasswordIsPlaceholder(span: string): boolean {
 const POSTGRES_LOOPBACK_DEFAULT =
   /^postgres(?:ql)?:\/\/postgres:postgres@(?:localhost|127\.0\.0\.1)(?::\d{1,5})?(?![\w.:@%-])/;
 
-/** A value span that is only an environment-variable read expression (#2912). */
+/**
+ * A value span that is only an environment-variable read expression (#2912):
+ * `process.env.X`, an `env` member of any object chain read by an ALL-CAPS
+ * name (`opts?.env?.AGENT_API_TOKEN`, `import.meta.env.VITE_X`, GST-1894),
+ * or the opening of an indexed or call read (`process.env[`, `os.environ[`,
+ * `os.getenv(`, `System.getenv(`). `env` must be a whole segment, so
+ * `myenv.X` is a value.
+ */
 const ENV_READ_SPAN =
+  /^(?:os\.environ\[|os\.environ\.get\(|(?:[A-Za-z_$][\w$]*\.)?getenv\(|ENV\[|process\.env\.[A-Za-z_$][\w$]*[;,)]?|(?:[A-Za-z_$][\w$]*[!?]?\.)*env(?:[!?]?\.[A-Z_][A-Z0-9_]*[;,)]?|(?:\?\.)?\[))$/;
+/** The reads #2912 exempted before GST-1894; a line with a fallback keeps exactly this exemption. */
+const ENV_READ_SPAN_2912 =
   /^(?:os\.environ\[|os\.environ\.get\(|os\.getenv\(|getenv\(|ENV\[|process\.env\.[A-Za-z_$][\w$]*[;,)]?)$/;
+/** The quoted ALL-CAPS variable name an indexed or call read opens with (`"AGENT_API_TOKEN"]`, `'DB_PASSWORD',`). */
+const ENV_NAME_ARGUMENT = /^(["'])[A-Z_][A-Z0-9_]*\1/;
+/** A fallback or default after the read: `??`, `||`, `or` or a ternary `:`, anywhere on the line. */
+const ENV_READ_FALLBACK = /\?\?|\|\||(?<![\w$])or(?![\w$])|:/;
+/**
+ * The rest of the line is read from the span's end, so a quote the match took
+ * is still seen: a literal fallback (`os.getenv("X", "<secret>")`) or a
+ * literal used as the name (`os.environ["<secret>"]`) keeps the finding.
+ * GST-1894's wider reads (`opts?.env?.X`, `process.env["X"]`,
+ * `System.getenv("X")`) are exempt only when the line holds no fallback, no
+ * second argument, and ends the expression with `;`, `,` or `)`. Any other
+ * line reads exactly as #2912 did, so a fallback after a comment, a blank line
+ * or on the next line is never exempted by the wider reads. The next line is
+ * never read.
+ */
 function isBareEnvRead(span: string, match: RegExpExecArray): boolean {
-  if (!ENV_READ_SPAN.test(span)) return false;
-  return !carriesSecretLiteral(match.input.slice(match.index + match[0].length).split("\n", 1)[0]);
+  const opensArgument = /[[(]$/.test(span);
+  const line = match.input.slice(spanBounds(match).end).split("\n", 1)[0];
+  const rest = opensArgument ? line.replace(ENV_NAME_ARGUMENT, "") : line;
+  if (ENV_READ_FALLBACK.test(rest) || (opensArgument && /^[ \t]*,/.test(rest)))
+    return ENV_READ_SPAN_2912.test(span) && !carriesSecretLiteral(rest);
+  if (!ENV_READ_SPAN.test(span) || carriesSecretLiteral(rest)) return false;
+  const after = opensArgument ? rest.replace(/^[\])]/, "") : rest;
+  return ENV_READ_SPAN_2912.test(span) || /[;,)]$/.test(span) || /^[ \t]*[;,)]/.test(after);
 }
 
 /** True when `text` holds a quoted, non-placeholder, high-entropy literal. */
@@ -689,6 +785,20 @@ const SCHEMA_FIELD_NAME =
 const SCHEMA_FIELD_VALUE = /^[a-z][a-z0-9]*(?:[_.-][a-z][a-z0-9]*)+$/;
 function isSchemaFieldIdentifier(span: string, match: RegExpExecArray): boolean {
   return SCHEMA_FIELD_NAME.test(match[0]) && SCHEMA_FIELD_VALUE.test(span);
+}
+/**
+ * GST-1894: in a test file, a value made only of lowercase words joined by `-`
+ * or `_`, one of them a credential word (`personal-secret`,
+ * `staging-api-key`), is a fixture label that says what it stands for.
+ * Decided by the file name (`*.test.ts`, `*.spec.tsx`, `test_*.py`,
+ * `*_test.go`). Outside a test file, without a path, or with a digit, an
+ * uppercase letter or no credential word, the value is checked as before.
+ */
+const TEST_SOURCE = /(?:^|[\\/])(?:[^\\/]+(?:\.test|\.spec|_test)\.(?:[cm]?[jt]sx?|py|go|rb|dart)|test_[^\\/]+\.py)$/;
+const FIXTURE_LABEL = /^[a-z]+(?:[-_][a-z]+)+$/;
+const FIXTURE_CREDENTIAL_WORD = /(?:^|[-_])(?:secret|token|password|passwd|key|credential)s?(?:[-_]|$)/;
+function isTestFixtureLabel(span: string, sourcePath: string | undefined): boolean {
+  return !!sourcePath && TEST_SOURCE.test(sourcePath) && FIXTURE_LABEL.test(span) && FIXTURE_CREDENTIAL_WORD.test(span);
 }
 /**
  * GST-1064: the first argument of a lookup call (`get`, `getenv`, `read`,
@@ -750,6 +860,7 @@ let stringSpansCache: { text: string; lang: string; spans: Array<[number, number
 /** Drops the cached text once a scan ends, so a long-lived process holds no scanned input. */
 export function clearStringSpanCache(): void {
   stringSpansCache = null;
+  codeLineCache = null;
 }
 
 /** The index after the comment at `i`: a line comment ends at its newline, a Dart block comment at its matching `*\/` (they nest). */
@@ -884,9 +995,40 @@ function stringSpans(text: string, lang: "py" | "dart"): Spans {
   return spans;
 }
 
-function insideString(text: string, offset: number, sourcePath: string): boolean {
-  if (!STRING_SPAN_SOURCE.test(sourcePath)) return false;
-  const spans = stringSpans(text, /\.dart$/i.test(sourcePath) ? "dart" : "py");
+/**
+ * JS template literals and block comments, from one pass over the whole input:
+ * the context a line cannot show on its own. A quote ends at its line end, a
+ * line comment is skipped, and `${…}` stays template text. A regex literal is
+ * not recognized, so a `//` or quote inside one can hide a template that opens
+ * later on its line, and a host in that template is exempt as it was before
+ * jsSpans. Cached and cleared with stringSpans.
+ */
+function jsSpans(text: string): Spans {
+  if (stringSpansCache?.text === text && stringSpansCache.lang === "js") return stringSpansCache.spans;
+  const spans: Spans = [];
+  const n = text.length;
+  for (let i = 0; i < n; ) {
+    const c = text[i]!;
+    if (text.startsWith("//", i)) {
+      const newline = text.indexOf("\n", i);
+      i = newline < 0 ? n : newline;
+    } else if (text.startsWith("/*", i)) {
+      const close = text.indexOf("*/", i + 2);
+      const end = close < 0 ? n : close + 2;
+      spans.push([i, end]);
+      i = end;
+    } else if (c === '"' || c === "'" || c === "`") {
+      let j = i + 1;
+      while (j < n && text[j] !== c && (c === "`" || text[j] !== "\n")) j += text[j] === "\\" ? 2 : 1;
+      if (c === "`") spans.push([i, Math.min(j + 1, n)]);
+      i = j + 1;
+    } else i += 1;
+  }
+  stringSpansCache = { text, lang: "js", spans };
+  return spans;
+}
+
+function inSpans(spans: Spans, offset: number): boolean {
   let lo = 0;
   let hi = spans.length - 1;
   while (lo <= hi) {
@@ -896,6 +1038,11 @@ function insideString(text: string, offset: number, sourcePath: string): boolean
     else return true;
   }
   return false;
+}
+
+function insideString(text: string, offset: number, sourcePath: string): boolean {
+  if (!STRING_SPAN_SOURCE.test(sourcePath)) return false;
+  return inSpans(stringSpans(text, /\.dart$/i.test(sourcePath) ? "dart" : "py"), offset);
 }
 
 /** The rest of a name's expression on its line, up to the comma, semicolon, bracket or comment that ends it; null when it continues on the next line. */
@@ -939,14 +1086,151 @@ function isSourceExpression(span: string, match: RegExpExecArray, sourcePath: st
   return !insideString(match.input, start, sourcePath);
 }
 
+/** The files isPropertyRead exempts in: TS, Dart and Python. JSX text in .tsx and .jsx can hold a host on any line, so those report as before. */
+const PROPERTY_READ_SOURCE = /\.(?:[cm]?ts|dart|pyi?)$/i;
+/** How far back on its line isPropertyRead reads from a span. A span further from its line start than this is never exempted. */
+const PROPERTY_READ_LINE_CHARS = 1000;
+/** The object chain in front of a span (`this.`, `ctx.`, `a!.`), skipped before the lead is read. Matched against the last 80 characters only, so a longer chain leaves a name as the lead, which never qualifies. */
+const PROPERTY_READ_CHAIN = /(?:[\w$#]+[!?]?\.)+$/;
+/** The token that opens an expression in front of the chain: an operator or bracket, or one of the language's expression keywords. Matched against the last 7 characters of the lead. */
+const PROPERTY_READ_LEAD = /(?:[([{,;?:=+]|=>|&&|\|\||\.\.\.)$/;
+const PROPERTY_READ_KEYWORD = {
+  js: /(?<![\w$])(?:return|await|typeof|yield|case|of|in)$/,
+  dart: /(?<![\w$])(?:return|await|yield|case|in)$/,
+  py: /(?<![\w$])(?:return|await|yield|not|and|or|in|if|elif|while|assert|else)$/,
+};
+/** After a span at the very start of its line, only a call, index or assignment shows code: a line holding just a host, or a host and a comma, is a list in a multi-line string. */
+const PROPERTY_READ_LINE_START_TAIL = /^(?:[ \t]*[([=]|\.[A-Za-z_$][\w$]*[ \t]*\()/;
+/** A line that is only a key and `:` or `=` before the span, the shape of YAML or dotenv text inside a JS template literal. */
+const PROPERTY_READ_BARE_KEY = /^[ \t]*[\w$.-]+[ \t]*[:=]$/;
+/** What closes or continues an expression after the span: a bracket, separator, operator, method call, cast, Python keyword, comment or line end. A `:` before a digit or `/` is a port or URL. */
+const PROPERTY_READ_TAIL = /^(?:[ \t]*(?:[()[\],;?=!]|&&|\|\||:(?![\d/])|\/\/|#|\r?$)|\.[A-Za-z_$][\w$]*[ \t]*\(|[ \t]+(?:as|and|or|if|else|for|instanceof)\b)/;
+
+/**
+ * codeLineStart's place in the text it last read: the next index, the start of
+ * that line, and what is open there. A scan checks its spans in order, so the
+ * next span resumes from here and the text is read once.
+ */
+let codeLineCache: {
+  text: string;
+  at: number;
+  lineStart: number;
+  indent: boolean;
+  quote: string;
+  comment: "" | "line" | "block";
+  slash: boolean;
+} | null = null;
+
+/**
+ * The start of `offset`'s line when `offset` is code, else -1: inside a quote
+ * opened on the line, after a line comment, inside a block comment opened on
+ * the line, on a block comment's `*` continuation line, or more than
+ * PROPERTY_READ_LINE_CHARS from the line start, or, in JS, after a `/` in
+ * code on the line (a regex literal can hold a quote, which would turn the
+ * quote tracking around). Each line is read on its own
+ * (a quote or comment never carries over a newline), so a span's answer
+ * depends only on its own line, whichever spans were checked before it.
+ */
+function codeLineStart(text: string, offset: number, lang: "js" | "py" | "dart"): number {
+  const cap = PROPERTY_READ_LINE_CHARS;
+  let s = codeLineCache;
+  if (!s || s.text !== text || s.at > offset || offset - s.at > cap) {
+    const head = text.slice(Math.max(0, offset - cap - 1), offset);
+    const newline = head.lastIndexOf("\n");
+    if (newline < 0 && offset > cap) return -1;
+    const lineStart = offset - head.length + newline + 1;
+    s = codeLineCache = { text, at: lineStart, lineStart, indent: true, quote: "", comment: "", slash: false };
+  }
+  let i = s.at;
+  while (i < offset) {
+    const c = text[i]!;
+    if (c === "\n") {
+      Object.assign(s, { lineStart: i + 1, indent: true, quote: "", comment: "", slash: false });
+      i += 1;
+      continue;
+    }
+    if (s.indent) {
+      if (c === " " || c === "\t") { i += 1; continue; }
+      s.indent = false;
+      if (c === "*" && lang !== "py") s.comment = "line";
+    }
+    if (s.comment === "line") {
+      i += 1;
+    } else if (s.comment === "block") {
+      if (text.startsWith("*/", i)) { s.comment = ""; i += 2; } else i += 1;
+    } else if (s.quote) {
+      if (c === "\\" && text[i + 1] !== "\n") i += 2;
+      else if (text.startsWith(s.quote, i)) { i += s.quote.length; s.quote = ""; }
+      else i += 1;
+    } else if (lang === "py" ? c === "#" : text.startsWith("//", i)) {
+      s.comment = "line";
+    } else if (lang !== "py" && text.startsWith("/*", i)) {
+      s.comment = "block";
+      i += 2;
+    } else if (c === '"' || c === "'" || (c === "`" && lang === "js")) {
+      s.quote = lang !== "js" && text.startsWith(c.repeat(3), i) ? c.repeat(3) : c;
+      i += s.quote.length;
+    } else {
+      if (c === "/" && lang === "js") s.slash = true;
+      i += 1;
+    }
+  }
+  s.at = Math.max(i, offset);
+  return s.quote || s.comment || s.slash || offset - s.lineStart > cap ? -1 : s.lineStart;
+}
+
+/**
+ * True when an `internal.hostname` span is a property read in source code
+ * (`server.local('/x')`, `if (config.prod)`, `if settings.internal:`) rather
+ * than a host (#3987). The pattern ends in `.local|.prod|.staging|…`, so any
+ * object with a property of that name reported, and the pregate secrets stage
+ * warned on every one in a pushed diff.
+ *
+ * Exempts only when all of these hold: the scan has a TS, Dart or Python
+ * file's path (PROPERTY_READ_SOURCE; without one nothing is exempt, and .tsx
+ * and .jsx report as before), the span starts with an
+ * identifier, it sits outside every string and comment on its line (and, in
+ * Python and Dart, outside every string of the file: insideString), and the
+ * line shows code syntax on both sides of it: an operator, bracket or one of
+ * the language's expression keywords before its object chain (or the line
+ * start, when a call, index or assignment follows), and a bracket, operator,
+ * method call or line end after it. A quoted host, a host in a comment,
+ * `db.internal:5432`, `build-7.internal`, `proxy.corp/api`, prose, and every
+ * host in a config, dotenv or Markdown file still report. In TS, a span
+ * inside a template literal or block comment of the scanned text (jsSpans) is
+ * never exempt. A scan of added lines only cannot see a
+ * template literal that opened above them, so in JS a line that is only a key
+ * and `:` or `=` before the span (`host: db.internal`, `DB_HOST=db.internal`)
+ * is never exempt either.
+ */
+function isPropertyRead(match: RegExpExecArray, sourcePath: string | undefined): boolean {
+  if (!sourcePath || !PROPERTY_READ_SOURCE.test(sourcePath)) return false;
+  const input = match.input ?? "";
+  const { start, end } = spanBounds(match);
+  if (!/^[A-Za-z_$][\w$]*\./.test(input.slice(start, end))) return false;
+  const after = input.slice(end, end + 40).split("\n", 1)[0]!;
+  if (!PROPERTY_READ_TAIL.test(after)) return false;
+  const lang = /\.pyi?$/i.test(sourcePath) ? "py" : /\.dart$/i.test(sourcePath) ? "dart" : "js";
+  const lineStart = codeLineStart(input, start, lang);
+  if (lineStart < 0) return false;
+  const before = input.slice(lineStart, start);
+  let k = before.length - (PROPERTY_READ_CHAIN.exec(before.slice(-80))?.[0].length ?? 0);
+  while (k > 0 && before[k - 1] === "!") k -= 1;
+  while (k > 0 && (before[k - 1] === " " || before[k - 1] === "\t")) k -= 1;
+  const lead = before.slice(Math.max(0, k - 7), k);
+  if (lang === "js" && PROPERTY_READ_BARE_KEY.test(before.slice(0, k))) return false;
+  if (k === 0 ? !PROPERTY_READ_LINE_START_TAIL.test(after) : !PROPERTY_READ_LEAD.test(lead) && !PROPERTY_READ_KEYWORD[lang].test(lead)) return false;
+  return lang === "js" ? !inSpans(jsSpans(input), start) : !insideString(input, start, sourcePath);
+}
+
 export const PATTERNS: RedactPattern[] = [
   // ===== HIGH — genuinely-secret credentials (block) =====
   {
     id: "aws.access_key",
     tier: "HIGH",
     category: "secret",
-    description: "AWS access key ID (AKIA…)",
-    regex: /\b(AKIA[0-9A-Z]{16})\b/,
+    description: "AWS access key ID (AKIA… long-term, ASIA… temporary)",
+    regex: /\b((?:AKIA|ASIA)[0-9A-Z]{16})\b/,
   },
   {
     id: "aws.secret_key",
@@ -977,6 +1261,20 @@ export const PATTERNS: RedactPattern[] = [
     category: "secret",
     description: "GitHub server-to-server token",
     regex: /\b(ghs_[A-Za-z0-9]{36})\b/,
+  },
+  {
+    id: "github.user_to_server",
+    tier: "HIGH",
+    category: "secret",
+    description: "GitHub App user-to-server token",
+    regex: /\b(ghu_[A-Za-z0-9]{36})\b/,
+  },
+  {
+    id: "github.refresh",
+    tier: "HIGH",
+    category: "secret",
+    description: "GitHub App refresh token",
+    regex: /\b(ghr_[A-Za-z0-9]{36,})\b/,
   },
   {
     id: "github.fine_grained",
@@ -1074,6 +1372,13 @@ export const PATTERNS: RedactPattern[] = [
       /\b(sk-(?:proj|svcacct|admin)-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{32,})\b/,
   },
   {
+    id: "openrouter.key",
+    tier: "HIGH",
+    category: "secret",
+    description: "OpenRouter API key",
+    regex: /\b(sk-or-v1-[a-f0-9]{64})\b/,
+  },
+  {
     id: "sendgrid.key",
     tier: "HIGH",
     category: "secret",
@@ -1086,6 +1391,27 @@ export const PATTERNS: RedactPattern[] = [
     category: "secret",
     description: "Stripe live SECRET key",
     regex: /\b(sk_live_[A-Za-z0-9]{24,})\b/,
+  },
+  {
+    id: "stripe.restricted",
+    tier: "HIGH",
+    category: "secret",
+    description: "Stripe live restricted key",
+    regex: /\b(rk_live_[A-Za-z0-9]{24,})\b/,
+  },
+  {
+    id: "supabase.secret",
+    tier: "HIGH",
+    category: "secret",
+    description: "Supabase secret API key",
+    regex: /\b(sb_secret_[A-Za-z0-9_-]{20,})\b/,
+  },
+  {
+    id: "supabase.pat",
+    tier: "HIGH",
+    category: "secret",
+    description: "Supabase personal access token",
+    regex: /\b(sbp_[a-f0-9]{40})\b/,
   },
   {
     id: "slack.token",
@@ -1224,6 +1550,7 @@ export const PATTERNS: RedactPattern[] = [
     // #2899: a function call assigned to the name is code, not a value (see
     // isCallExpression). #3048, #3630: so is a TS/JSX/Dart/Python type or expression (isSourceExpression).
     // #3208: so is a schema field identifier (isSchemaFieldIdentifier).
+    // GST-1894: so is a self-named fixture label in a test file (isTestFixtureLabel).
     validate: (span, match, opts) =>
       isCredentialShapedEnvName(match[0]) &&
       !isPlaceholderSpan(span) &&
@@ -1232,6 +1559,7 @@ export const PATTERNS: RedactPattern[] = [
       !isCallExpression(span, match) &&
       !isSourceExpression(span, match, opts?.sourcePath) &&
       !isSchemaFieldIdentifier(span, match) &&
+      !isTestFixtureLabel(span, opts?.sourcePath) &&
       shannonEntropy(span) >= 3.0,
   },
   {
@@ -1276,8 +1604,9 @@ export const PATTERNS: RedactPattern[] = [
     // so do a county tax-map parcel ID (see looksLikeParcelId), vector
     // coordinates (looksLikeDecimalCoordinates) and seed/nonce/timestamp JSON
     // values (isNumericMetadataValue), GitHub Actions run and job ids in
-    // their id positions (isCiRunIdentifier), and bare powers of two and
-    // hash/PRNG constants (isNumericConstant).
+    // their id positions (isCiRunIdentifier), a short sha after
+    // review_loop_grant or review_loop_exception (isReviewLoopSha), and bare
+    // powers of two and hash/PRNG constants (isNumericConstant).
     validate: (span, match) =>
       !insideUuid(match) &&
       span.replace(/\D/g, "").length >= 10 &&
@@ -1286,7 +1615,8 @@ export const PATTERNS: RedactPattern[] = [
       !looksLikeParcelId(span, match) &&
       !looksLikeDecimalCoordinates(span) &&
       !isNumericMetadataValue(span, match) &&
-      !isCiRunIdentifier(span, match),
+      !isCiRunIdentifier(span, match) &&
+      !isReviewLoopSha(span, match),
   },
   {
     id: "pii.ssn",
@@ -1323,14 +1653,14 @@ export const PATTERNS: RedactPattern[] = [
     category: "pii",
     description: "Public IPv4 address",
     regex: /\b(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\b/,
-    validate: (span, match) => isPublicIPv4(span) && !isDeclaredVersion(match),
+    validate: (span, match, opts) => isPublicIPv4(span) && !isDeclaredVersion(match) && !isVersionContext(match, opts?.sourcePath),
   },
   {
     id: "pii.wallet",
     tier: "MEDIUM",
     category: "pii",
     description: "Crypto wallet address (ETH/BTC)",
-    regex: /\b(0x[a-fA-F0-9]{40}|bc1[a-z0-9]{25,39}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b/,
+    regex: /\b(0x[a-fA-F0-9]{40}|bc1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{25,39}|[13][a-km-zA-HJ-NP-Z1-9]{25,34})\b/,
     validate: (span) => looksLikeWallet(span),
   },
 
@@ -1342,8 +1672,10 @@ export const PATTERNS: RedactPattern[] = [
     description: "Internal hostname (*.internal/.corp/.local/.prod/.staging)",
     regex: /\b([a-z0-9][a-z0-9\-]*\.(?:internal|corp|local|lan|prod|staging))\b/i,
     // `.env.local`, `CLAUDE.local.md` and friends are filenames, not hosts.
-    // See isDotenvFilename and isLocalConfigFilename.
-    validate: (_span, match) => !isDotenvFilename(match) && !isLocalConfigFilename(match),
+    // See isDotenvFilename and isLocalConfigFilename. A property read in
+    // code (`config.prod`) is not a host either: see isPropertyRead (#3987).
+    validate: (_span, match, opts) =>
+      !isDotenvFilename(match) && !isLocalConfigFilename(match) && !isPropertyRead(match, opts?.sourcePath),
   },
   {
     id: "internal.url_private",

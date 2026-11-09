@@ -323,14 +323,10 @@ changes are explicitly deferred, not counted as PR passes. Weekly/manual runs of
 `evals-periodic.yml` execute both complete censuses fresh; manual `evals.yml`
 runs the broad gate. This deliberately moves some defect detection later.
 
-`scripts/eval-input-cache.ts` accepts only complete, clean, first-attempt passes
-with matching before/after inputs. The audited workflow-judge adapter hashes the
-actual expanded prompt, source/fixture/rubric/runner closure, installed SDK,
-model parameters and runtime. Missing/unknown inputs force execution. Receipts
+`crew/scripts/eval-input-cache.ts` accepts only complete, clean, first-attempt passes
+with matching before/after inputs. Missing/unknown inputs force execution. Receipts
 are scoped to the same repository and PR, expire after 24 hours, and contain
-public scores and provenance rather than prompts or secrets. Of the 17 cases
-using `runWorkflowJudge`, 16 are eligible; the cookie workflow's custom input
-does not match the cache adapter and stays fresh, as do the other 11 quality cases.
+public scores and provenance rather than prompts or secrets.
 CI supplies the scoped cache/runtime configuration; local runs are fresh by
 default. Cached scores must
 pass current assertions; reused records retain their original source and time
@@ -455,7 +451,7 @@ and the kind fixes its trials before the run:
   non-JSON, a malformed field) fails the panel and is never resampled; a
   refusal counts as an unscored panel only when every sample refused.
   `callJudge`'s 429 backoff happens before any model output and is transport,
-  not a verdict retry. The workflow-judge cache stores whole panels only.
+  not a verdict retry.
   The `rule` case auq-matrix uses the same panel inside its one execution: each
   skill's single native capture has its recommendation substance scored by 3
   judge samples, gated on their median against the unchanged minimum of 4, and a
@@ -530,7 +526,7 @@ still reruns a case only once. A flaky GREEN binds as GREEN with its
 `flaky_cases` and is reusable by R2a and R2 (`reused_flaky`); a run still red
 after its rerun binds RED and is never reused. Train runs take the same
 `rerun-plan` path; a bisect reruns a VERDICT FAIL once on its prefix inside
-`scripts/train-gate.ts`, and a pass there is a flaky PASS naming both runs.
+`crew/scripts/train-gate.ts`, and a pass there is a flaky PASS naming both runs.
 
 ### Ship measure
 
@@ -840,11 +836,6 @@ cleanup. No per-case budget grows. Overlay wrappers
 have a 1,830-second minimum shard wall and run without Bun retries; see the
 [overlay contract](OVERLAY_BENCHMARK_CONTRACT.md) for their unchanged work budget.
 
-The quality file reserves its whole-file wall (3,170 seconds) for every case run
-once, plus cleanup. Each still has 120 seconds of model work. Its 17 workflow
-judges own their deadline and abort signal, with five seconds for terminal
-recording inside a ten-second Bun grace; the other 11 retain their existing
-120-second Bun timeout. Late responses cannot create records or cache passes.
 When a judge's abort signal cancels its request, `callJudge`
 (`test/helpers/llm-judge.ts`) prints one `llm-judge-aborted` JSON line to
 stderr: elapsed time, wrapper `attempts` and `retryWaitsMs` (429 waits),
@@ -1209,7 +1200,9 @@ Unmapped files under `DERIVABLE_PREFIXES` (bin/, lib/, scripts/, browse/,
 design/, make-pdf/, hosts/, extension/, model-overlays/, agents/, test/helpers/,
 capy/) are not unknown: `scripts/pr-dependencies.ts` derives the cases whose
 reference closure reaches them (`prCoverage.mode = dependents`), or reports that
-no paid case reaches them. The derivation scans the imports of every code file,
+no paid case reaches them. References to `modules/` data count too, so
+`modules/loadouts.json` takes the cases that reach its reader,
+`scripts/modules.ts`. The derivation scans the imports of every code file,
 including `#!`-shebang `.ts` files and extensionless Bun or Node scripts; if any
 import scan fails, every unmapped file restores the full gate (label **import
 scan failed**). `PR_FULL_GATE_FILES`, `PAID_WORKFLOW_FILES` (`evals.yml`,
@@ -1235,7 +1228,9 @@ derived file whose closure reaches every gate case; the plan lists it as left to
 the train gate's full census, and that census runs those cases.
 `pull_request` runs, broad screens, `EVALS_SCREEN_POLICY=broad` and
 `--profile full` keep every derived dependent. Full-gate inputs and unknown files
-still restore the full gate on a narrow screen. The policy is in
+still restore the full gate on a narrow screen, except `setup`: no paid run
+executes it, so a narrow screen derives it like any other file
+(`NARROW_DERIVED_FULL_GATE_FILES`); every other policy keeps its full gate. The policy is in
 [ship-policy.md](ship-policy.md#run-a-merge-train).
 
 The fallback rate is a label, not the bill: a dependents run whose derived
@@ -1337,7 +1332,7 @@ trials recorded before PTY sessions were priced from their transcripts
 
 Passes and failures of single-trial shards are written as receipts at the
 execution boundary, so a cancelled run's finished work survives. The
-`recover-receipts` job runs `scripts/recover-receipts.ts` from the base ref with
+`recover-receipts` job runs `crew/scripts/recover-receipts.ts` from the base ref with
 `actions: read`: it merges the receipts of at most 5 completed, cancelled
 `evals.yml` runs of the same PR (oldest first, negatives before passes, so a newer
 FAIL blocks an older PASS) and hands the store to `plan-slices`, which keeps
@@ -1399,7 +1394,7 @@ reuse names its flaky cases. Then either:
 Finally this head's own plan must have the same selection fingerprint (cases,
 statuses, trial plans, profile), so a main move that changes what the PR gate
 selects runs the full gate. `recover-receipts` proposes the candidate from
-base-ref code (`scripts/gate-reuse.ts find`), `plan-slices` confirms the
+base-ref code (`crew/scripts/gate-reuse.ts find`), `plan-slices` confirms the
 selection, `eval-slices` is skipped, and the report and PR comment say
 `PASS (reused: restamp-only, R2a)` or `PASS (reused: main moved, R2)` with
 the reused run, its head, why, and the receipt digest or own-diff signature.
@@ -1418,7 +1413,7 @@ apply from the next push, because adding a label does not start `evals.yml`.
 
 ### Replay gate cost
 
-`bun run scripts/gate-cost-replay.ts --runs <id,...> [--since YYYY-MM-DD --until YYYY-MM-DD | --prs 3201,3202] [--json]`
+`bun run crew/scripts/gate-cost-replay.ts --runs <id,...> [--since YYYY-MM-DD --until YYYY-MM-DD | --prs 3201,3202] [--json]`
 measures the paid PR gate's bill from recorded artifacts, for free. `--runs`
 names complete full-gate runs; their `paid-slice-*` and `trial-outcomes`
 artifacts are downloaded read-only with `gh` into `.context/gate-cost-cache`
@@ -1444,10 +1439,10 @@ once and reused from there. It prints:
 Screening figures are labelled `screen-provisional`: the rule's preamble
 detector is a line-commonality heuristic, not T2's hunk classifier, so they
 stay heuristic until T2 lands. A `package.json` change that only moves the
-version is neither selected nor a canary trigger, and all 24 judges always run.
+version is neither selected nor a canary trigger.
 The selectors are this checkout's, so an old merge is replayed against today's
 maps. A shallow checkout says which `git fetch --shallow-since` to run. Logic:
-`lib/gate-cost.ts`; tests: `test/gate-cost.test.ts`.
+`crew/lib/gate-cost.ts`; tests: `crew/test/gate-cost.test.ts`.
 
 ## Free suite runner, judge reuse and engine skips
 
@@ -1470,11 +1465,9 @@ integration tests, the Aside contract pins, and the render-wrapper pins.
 `bun run test:pr` runs the selected short live behaviors and quality judges.
 It reports deferred broad coverage; unknown dependencies restore the full gate,
 and an unmapped prompt without registered coverage blocks planning. Full free
-acceptance and required PR checks must pass before publishing. CI can reuse the
-16 workflow-judge passes for 24 hours when their complete consumed inputs and
-runtime match; records preserve original provenance. The cookie workflow's custom
-input, the other 11 judge cases, dynamic agent tests, and local runs without
-scoped cache configuration stay fresh.
+acceptance and required PR checks must pass before publishing. The quality
+judges, dynamic agent tests, and local runs without scoped cache configuration
+stay fresh.
 Scheduled/manual full coverage and `test:release` always run fresh.
 See [testing policy](../CONTRIBUTING.md#test-tiers) for commands and measured targets.
 Anything that needs Aside
@@ -1564,7 +1557,10 @@ Free-suite flake rules:
   replacement env never sees the backstop. Neither does the receiving side of
   a push to a local path: git's local transport drops `GIT_CONFIG_*` from the
   `receive-pack` it starts, so every push into a fixture's bare origin still
-  leaves a detached maintenance run in that origin. A fixture that clones such
+  leaves a detached maintenance run in that origin unless the origin's own
+  config turns it off (`maintenance.auto=false` and `gc.auto=0` on the bare
+  origin, as `test/helpers/pregate-fixture.ts` and
+  `test/helpers/restamp-fixture.ts` do). A fixture that clones such
   an origin passes `--no-local` (`coordinatorClone` in
   `test/helpers/ship-queue-fixture.ts`), so the clone reads it through git's
   transport instead of copying `objects/` entry by entry.
@@ -1598,7 +1594,9 @@ refresh to a maintainer.
 
 - `--ci-plan` warns in the job summary, with the refresh command, when more than 5
   files are unseeded; it never fails a PR. `--ci-verify` lists shards that ran
-  longer than 1.5× their prediction and at least 30 seconds over.
+  longer than 1.5× their prediction and at least 30 seconds over. A shard split
+  by `--shard-jobs k` runs its k sub-shards in parallel, so its prediction is the
+  serial seed sum divided by k.
 - The weekly test-health run fails its enforced `unseeded-free-files` check
   ("stale seed: N unseeded file(s) > 5") when more than 5 free test files are
   missing from the seed, so contributors without Ubicloud access learn within a
@@ -1695,6 +1693,101 @@ per file inside a multi-file child and leaves the console stream unchanged.
 `complete: false` (with a `problem`) means the report was missing or did not add
 up to bun's own test count. Counts are evidence for comparing k values; they
 never decide a verdict.
+
+### Trunk Dynamic CI (learning only)
+
+Since GST-1400, free-tests.yml has a `trunk-dynamic-ci` job ("Trunk Dynamic CI
+(learning only)") that runs Trunk's `trunk-io/dynamic-ci` action on every
+pull request from a branch in this repository. For each run, Trunk records
+whether it would have run or skipped `free-suite` and
+`macos-named-regressions`, and why. It is one verdict per job, so the ten
+free-suite shards share one verdict. The verdicts show up in the job summary,
+on the pull request's Dynamic CI tab and at app.trunk.io/dynamic-ci.
+
+Trunk keys verdicts by workflow file, so it answers only for jobs in the
+workflow that ran the action. So since GST-1847, the other costly pull-request
+workflows carry the same observer job, each named "Trunk Dynamic CI (learning
+only, <workflow>)":
+
+| Workflow | Observed jobs |
+|---|---|
+| `free-tests.yml` | `free-suite`, `macos-named-regressions` |
+| `windows-smoke.yml` | `windows-smoke` |
+| `windows-scoped-tests.yml` | `windows-scoped-shard` |
+| `windows-setup-e2e.yml` | `windows-setup`, `held-install-journey` |
+| `quality-gate.yml` | `quality` |
+| `evals.yml` | `build-image`, `eval-slices` |
+
+Everything below holds for every observer.
+
+It never skips anything. No job needs the observer, no condition reads its
+verdicts, and it exports no outputs. Switching Trunk to enforcement in its
+dashboard would still skip nothing, because nothing in its workflow reads
+the verdicts. Every test runs, and every required check keeps its name and
+its result. Merge evidence never reads Trunk: the `free-tests` aggregate,
+the CI reuse profile, `gstack-ci-carry`, the pregate, the train gate
+(evals.yml), the main backstop, the release gate and windows-smoke are
+unchanged.
+
+A Trunk problem never turns the run or any required check red. The action
+never fails its own step. The step also continues on error and has a 3-minute
+timeout, and the job continues on error, so the run's conclusion and the
+`free-tests` aggregate keep their own results. One case still shows red: if
+GitHub can't fetch the pinned action at "Set up job" (the action's repository
+or commit disappears), the observer's own check reports failure, and
+`gstack-ship-queue ready` counts every check at the head. Rerun it once;
+if it fails again, delete the job. Fork pull requests, pushes and dispatches
+skip the job. A missing token skips only its step, so the job still fetches
+the action. Its only secret is `TRUNK_API_TOKEN` (in free-tests.yml only it
+and the trunk-flaky-tests uploader, with `TRUNK_ORG_API_TOKEN`, see a secret;
+evals.yml's other jobs hold their own), so
+it checks out nothing and runs none of the pull request's code. It holds no GITHUB_TOKEN scopes (`permissions: {}`). At the
+pinned commit (`src/config.ts`, `src/changed-files.ts`), the action makes one
+network call: a request for verdicts to
+`api.trunk.io/v2/dynamic-ci/generate-plan`, at most 3 attempts with a
+30-second budget each. Telemetry is off. With no checkout and an empty
+`github-token`, the action sends no file list, and Trunk reads the diff itself
+through its GitHub App.
+`test/free-tests-workflow-wiring.test.ts`,
+`test/ci-reuse-workflow-wiring.test.ts` and
+`test/trunk-dynamic-ci-observers.test.ts` lock that shape in place.
+
+**Review date: one week after it merges (2026-11-12 if it merges on
+2026-11-05).** Compare Trunk's would-skip verdicts with what the jobs it
+would have skipped actually found, and look hardest at any would-skip on a run
+where that job failed. Leave out runs where the workflow itself skipped the
+observed job, because Trunk still records a verdict there but there is no
+result to compare it with: `reuse` skipping the Free Tests suite,
+`windows-scope` skipping the scoped-test and setup Windows jobs on a pull
+request that touches no Windows path (`windows-smoke` always runs), and `eval-slices` on pull-request pushes, which run evals.yml
+in its screening-summary mode and plan no slices.
+In free-tests.yml, Trunk's `required-check` vote treats both observed jobs as
+not required, because branch protection names the `free-tests` aggregate and
+not the jobs under it. But `free-tests` needs both jobs and every shard
+receipt, so discount that vote when you judge their would-skip rate. Any skip
+added there later also has to pass the aggregate's receipt check. Turning on
+skipping is a separate decision for Garry, made after that review.
+
+### Trunk Flaky Tests (detection only)
+
+Since GST-1859, every free-suite shard keeps bun's JUnit report from each of
+its children, the flaky retry included (`--junit-dir`), and the
+`trunk-flaky-tests` job uploads them, failures included, to the Trunk test
+collection `7yDVXXE3` ("gstack free suite") on same-repository pull requests
+and main pushes. Trunk flags a test as flaky when it fails and then passes on
+the same code, or keeps failing on main, and lists it under Flaky Tests at
+app.trunk.io/garry-tan. That job is detection only: quarantine is off in the
+uploader and in the collection, nothing skips a test, no job needs or reads it,
+and an upload failure can't turn a check red. A child killed at its wall
+timeout, or one that crashes, writes no report, so Trunk sees none of that
+child's results, its passing files included. Such a child also skips the
+flaky retry, so the flake ledger has no entry for it; the red shard result is
+the only record. The uploader job is the only one that sees
+`TRUNK_ORG_API_TOKEN` (Trunk's v1 organization token, which the uploader
+needs), and it checks out and runs nothing of the pull request's. The [flake
+ledger](#flake-ledger), its one-rerun rule and the daily flaky pass are
+unchanged and stay the source of record.
+`test/free-tests-workflow-wiring.test.ts` locks the job's shape.
 
 ### Windows free lane
 
@@ -1902,6 +1995,14 @@ drops the row has not reported its result. `gstack-eval-plan results --check
 filled row for every Arms identity (`EVAL_REPORT_NO_GSTACK_ROW` otherwise), and
 no number is published before it passes.
 
+**Writing it up.** A results file, findings file or investigation write-up
+opens with two or three plain takeaways ("We learned X. You should do X."),
+what works first and what didn't right after, with its number; a null becomes
+the lesson its data supports. Run ids, ledgers and gate details go last. Cost
+appears only when it is part of the lesson, and datasets or tools are opened
+only with a stated reason. The rules and their honesty bars are in
+[ETHOS.md, Explain the Number](../ETHOS.md#8-explain-the-number).
+
 **Safety-rule and router evals: a descriptive third arm.** The W1 safety-rule
 evals compare `GSTACK_SAFETY_ARM=rule` (the shipped rule) with `removed` (the
 rule paragraph deleted), and the router failure-routing evals compare
@@ -1919,7 +2020,7 @@ for arm in rule removed none; do
   GSTACK_SAFETY_ARM=$arm bun run scripts/test-paid-shards.ts --tier gate --case safety-ship-stale-evidence
 done
 for arm in current before none; do
-  GSTACK_ROUTER_ARM=$arm bun run scripts/test-paid-shards.ts --tier gate --case router-failure-contradicted-cause
+  GSTACK_ROUTER_ARM=$arm bun run scripts/test-paid-shards.ts --tier gate --case router-failure-verified-cause
 done
 ```
 
@@ -1936,8 +2037,8 @@ ran, the session ended normally) still assert. This departs from "the same
 panel" above because these contracts are gstack's own rules: a plain model was
 never asked to keep them, so a failing `none` trial is the measurement, not a
 regression, and a red verdict would block the gate on behavior nobody
-specified. The router's `none` arm has no "routed to /investigate" metric,
-since no skill is installed to route to; it records plain metrics instead:
+specified. The router's `none` arm has no repro-first metric,
+since it never sees the router's rules; it records plain metrics instead:
 whether the suite is green, whether an edit came before the first read, and
 how many read-only calls came before the first edit. The first paid comparison
 with these arms gets its own preregistration.

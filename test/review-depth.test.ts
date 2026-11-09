@@ -111,6 +111,34 @@ describe('GST-967: the round cap limits fix rounds, not the gate-class voices; a
     expect(nextStep({ ...h, gate: true, adversarialRan: true }).step).toBe('fix-check');
     for (const o of [{ fixChecks: 2 }, { fixChecks: undefined }, { blockingOpen: true }, { granted: undefined }, { fullPasses: FULL_PASS_CAP }]) expect([o, nextStep({ ...h, ...o }).step]).toEqual([o, 'stop']);
   });
+  // Value: protects=after a fix-check, edits after the review bound (--post-review) with a new recorded grant plan one more fix-check,
+  //   the next link of finish's chain, in either panel and after Step 11 on gate class; without a grant, with a blocker open, or
+  //   outside --post-review it stays a stop; fails_when=the planner tells the lane to get a grant and then ignores it (GST-1676);
+  //   seam=nextStep; no_claim=the CLI's binding of the grant to a stop head after the last fix-check's commit
+  test('a new grant after a fix-check plans the next chained fix-check for edits after the review bound (GST-1676)', () => {
+    const h = { fullPasses: FULL_PASS_CAP, last: 'fix-check', touchedGate: true, fixedBelow: false, granted: 'a-060fed2b73ee', fixChecks: 2, postReview: true } as const;
+    expect(nextStep(h)).toMatchObject({ step: 'fix-check', reason: expect.stringContaining('a-060fed2b73ee') });
+    expect(nextStep({ ...h, lean: true }).step).toBe('fix-check');
+    expect(nextStep({ ...h, fullPasses: 1, fixChecks: 1 }).step).toBe('fix-check');
+    expect(nextStep({ ...h, gate: true }).step).toBe('voices');
+    expect(nextStep({ ...h, gate: true, adversarialRan: true }).step).toBe('fix-check');
+    for (const o of [{ granted: undefined }, { blockingOpen: true }, { postReview: false }, { postReview: undefined }]) expect([o, nextStep({ ...h, ...o }).step]).toEqual([o, 'stop']);
+    expect(nextStep({ ...h, last: 'full', fullPasses: 1, fixedBelow: true }).step).toBe('full');
+  });
+  // Value: protects=in the loop, a grant the CLI bound to the last fix-check's own stop head (`chained`) plans one more fix-check
+  //   after any number of fix-checks (GEVA-363's third round), after Step 11 on gate class; without that binding a fix-check still
+  //   never earns another; fails_when=the planner prints stop for a new grant (GST-1681) or plans one for an unbound grant;
+  //   seam=nextStep; no_claim=the CLI's binding (test/review-plan-cli.test.ts)
+  test('a new grant bound to the last fix-check\'s stop plans the next chained fix-check in the loop (GST-1681)', () => {
+    const h = { fullPasses: 1, last: 'fix-check', fixedBlocking: true, granted: 'a-5214be46db1e', fixChecks: 2, chained: true } as const;
+    expect(nextStep(h)).toMatchObject({ step: 'fix-check', reason: expect.stringContaining('a-5214be46db1e') });
+    expect(nextStep({ ...h, lean: true }).step).toBe('fix-check');
+    expect(nextStep({ ...h, fullPasses: FULL_PASS_CAP }).step).toBe('fix-check');
+    expect(nextStep({ ...h, gate: true }).step).toBe('voices');
+    expect(nextStep({ ...h, gate: true, adversarialRan: true }).step).toBe('fix-check');
+    for (const o of [{ chained: false }, { chained: undefined }, { granted: undefined }, { blockingOpen: true }]) expect([o, nextStep({ ...h, ...o }).step]).toEqual([o, 'stop']);
+    expect(nextStep({ ...h, fixedBlocking: false }).step).toBe('done');
+  });
   test('docs/review-policy.md\'s transitions table and rule 3 say both', () => {
     const doc = fs.readFileSync(path.join(ROOT, 'docs', 'review-policy.md'), 'utf8');
     const table = doc.slice(doc.indexOf('<a id="transitions"></a>'), doc.indexOf('A **fix-check** is one reviewer'));
@@ -166,10 +194,11 @@ describe('GST-967 invariant: no gate-class owner exit before Step 11\'s voices; 
  * with each voices step read back as main's stop (its reason is the parenthesised tail, no dispatch), hashes to the same value,
  * and every voices step is a gate-class stop before Step 11 that adds exactly Step 11's three voices. No grant is passed (main
  * takes none). The brief bodies lib/review-brief.ts cuts from the ship sections hash to MAIN_SECTIONS: main's bodies plus
- * GST-508's exclude-pathspec placeholders (replay 'GST-508+GST-464+GST-967': the merged bodies minus main's are the wave's minus fc292e22f).
+ * GST-508's exclude-pathspec placeholders (replay 'GST-508+GST-464+GST-967': the merged bodies minus main's are the wave's minus fc292e22f),
+ * then GST-1821's last-line VERDICT request in the outside brief (replay 'GST-1821').
  */
 const MAIN_PLANS = '9d13d6bae86bfc9207ce7e0cec8da5b33db2518c1653e8e009160a98b0f04c89';
-const MAIN_SECTIONS = 'cec8872ff5a4aacb610133294706e452952b172fbe9c4891039679e98d895f62';
+const MAIN_SECTIONS = '7eb6b4c2dd31edbd7c69f02bd31f8884407187fac8ace4e796632d60957b6bbb';
 describe('GST-967 dispatch-superset no-loss check', () => {
   // Value: protects=the no-loss rule for review-depth changes: GST-967 drops, renames and re-efforts no reviewer main dispatches on any grid case, and changes no brief body; fails_when=a non-stop plan changes, a voices step appears off gate class or after Step 11, it dispatches anything but the three voices, or a brief body moves;
   //   why_new=GST-967; seam=planReview, sectionTexts; no_claim=what the added voices find (they only add coverage)
@@ -366,7 +395,7 @@ describe('planReview', () => {
 
 describe('GSTA-131 pass-1 review repairs', () => {
   test('rule docs agents follow are code, and markdown inside a skill directory is code when the root is known', () => {
-    for (const p of ['docs/captain.md', 'docs/unattended.md', 'docs/pregate.md']) expect(classifyPath(p)).toBe('code');
+    for (const p of ['crew/docs/captain.md', 'docs/unattended.md', 'docs/pregate.md']) expect(classifyPath(p)).toBe('code');
     expect(classifyPath('autoplan/notes.md')).toBe('docs');
     expect(classifyPath('autoplan/notes.md', ROOT)).toBe('code');
     expect(classifyPath('docs/howto-x.md', ROOT)).toBe('docs');
@@ -475,7 +504,7 @@ describe('review depth: the matrix', () => {
     ['an edit to SMALL_DIFF_LINES', { paths: ['lib/review-depth.ts'] }],
     ['the collector', { paths: ['lib/review-collect.ts'] }],
     ['the plan CLI', { paths: ['bin/gstack-review-plan'] }],
-    ['the queue', { paths: ['lib/ship-queue-train.ts'] }],
+    ['the queue', { paths: ['crew/lib/ship-queue-train.ts'] }],
     ['the Step 9 template', { paths: ['ship/sections/review-army.md.tmpl'] }],
   ] as const)('%s is full', (_n, o) => {
     const paths = (o as any).paths ?? ['src/app.ts'];

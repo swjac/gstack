@@ -14,7 +14,7 @@ import {
   DERIVABLE_PREFIXES, PERIODIC_ONLY_PR_FILES, PR_FULL_GATE_FILES, PR_PROFILE_MAPS, formatPrCoverageSummary, selectPrProfile, unknownFileLabel,
 } from '../scripts/test-pr-profile';
 import { buildRunManifest, computePaidCaseSelection } from '../scripts/test-paid-shards';
-import { E2E_TIERS } from './helpers/touchfiles-data';
+import { E2E_TIERS, LLM_JUDGE_TOUCHFILES } from './helpers/touchfiles-data';
 import { matchGlob } from './helpers/test-selection';
 
 const ROOT = path.resolve(import.meta.dir, '..');
@@ -162,7 +162,7 @@ describe('safe classification (A1-2)', () => {
   });
 
   test('repository config read only by free lanes or GitHub stays in the PR profile', () => {
-    const files = ['.github/dependabot.yml', '.osv-scanner.toml', 'setup.ps1', '.gitlab-ci.yml', '.github/ISSUE_TEMPLATE/bug_report.md', '.gstack/ship-policy.example.json'];
+    const files = ['.github/dependabot.yml', '.osv-scanner.toml', 'setup.ps1', '.gitlab-ci.yml', '.github/ISSUE_TEMPLATE/bug_report.md', '.gstack/ship-policy.example.json', '.gstack/plain-titles.json'];
     for (const file of files) expect(real.tracked.has(file), file).toBe(true);
     const result = computePaidCaseSelection({ profile: 'pr', env: {}, changedFiles: files, packageVersionOnly: true });
     expect(result.coverage?.mode).toBe('pr');
@@ -355,7 +355,7 @@ describe('narrow screens leave hub files to the train gate', () => {
     expect(result.coverage?.hubFiles).toEqual([hub]);
     expect(result.coverage?.mode).toBe('pr');
     expect(result.selection).toEqual({ e2e: [], judges: [] });
-    expect(plan([hub], 'broad').selection.judges!.length).toBeGreaterThan(0);
+    expect(plan([hub], 'broad').selection.judges).toEqual(Object.keys(LLM_JUDGE_TOUCHFILES).sort());
     expect(formatPrCoverageSummary({ profile: 'pr', selection: result.selection, prCoverage: result.coverage }).join('\n'))
       .toContain(`Left to the train gate's full census (narrow screen): \`${hub}\``);
     expect(result.reason).toContain(`train gate's full census runs them: ${hub}`);

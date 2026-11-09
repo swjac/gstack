@@ -4,7 +4,7 @@
  * IRON LAW ("no completion claims without fresh verification evidence").
  *
  *   gstack-evidence run [--reuse [--max-age <hours>]] --label <L> -- <cmd...>
- *   gstack-evidence record-ci --label <L> --base <base> -- <cmd>
+ *   gstack-evidence record-ci --label <L> --base <base> [--remote-gate-stands-in] -- <cmd>
  *   gstack-evidence passed -- <cmd>
  *   gstack-evidence carried [--base <branch>] [--json]
  *   gstack-evidence check [--label <L> [--expect-cmd <exact string>]]... | --all
@@ -72,7 +72,11 @@
  * mapped it (`origin/<base>@<sha>:…`); `carried` lists those rows at the
  * current tree for the ship receipt, only when that policy is origin/<the
  * receipt's base> (GST-1190: a row a run against another base wrote never
- * counts).
+ * counts). With --remote-gate-stands-in (gstack-ship-release's lanes), a lane
+ * whose inventory command refuses HEAD's tree (inventory_failed) is recorded
+ * as source "remote_gate" when the cleared pregate.json/remote_gate verifies
+ * for that exact tree (lib/remote-gate-stand-in.ts, GST-1688); `carried`
+ * never lists it, since no CI run carried it.
  *
  * MACHINE-LOCAL by design: neither the ledger nor the logs are brain-synced.
  * A synced record citing an unsynced log would grade FRESH on a machine where
@@ -100,6 +104,7 @@ import { findCarry, laneMapping, mappingCoverage, perFileCommand } from "../lib/
 import { DEFAULT_MAX_AGE_HOURS, runChanged } from "../lib/run-evidence";
 import { isConfigUnavailable, loadConfigFromBase } from "../lib/pregate/config";
 import { buildRunCheck } from "../lib/pregate/run-check";
+import { readTestLaneExceptions, testLaneExceptionText, type BoundLaneException } from "../lib/test-lane-exception";
 
 const BIN_DIR = dirname(Bun.fileURLToPath(import.meta.url));
 const LOG_MAX_BYTES = 2 * 1024 * 1024;
@@ -124,8 +129,10 @@ interface EvidenceRecord {
   identity?: string;
   /** The original ts of the row a `run --reuse` copied. */
   reused_from?: string;
-  /** "ci" for a lane CI carried (record-ci); absent for a local run. */
-  source?: "ci";
+  /** "ci" for a lane CI carried (record-ci); "remote_gate" for a lane whose inventory refused HEAD's tree and the cleared remote gate for that tree stood in (record-ci --remote-gate-stands-in, GST-1688); absent for a local run. */
+  source?: "ci" | "remote_gate";
+  /** The pregate.json/remote_gate receipt that stood in for the lane (source "remote_gate"). */
+  remote_gate?: string;
   runs?: string[];
   profiles?: string[];
   /** The CI jobs a jobs-mapped lane carried from (record-ci, GST-1189); tests_ran is then "n/a". */
@@ -140,6 +147,8 @@ interface EvidenceRecord {
   not_owed?: string;
   /** The per_file run of the inventory files CI skipped entirely; not_owed: the ones that skipped every test here too (GST-1314). */
   skipped_here?: { label: string; files: string[]; tests_ran: number | "unknown"; not_owed?: string[] };
+  /** The owner's test-lane exception that let a lane carry with uncovered inventory files, and the preflight of exactly them here (GST-1595). */
+  exception?: BoundLaneException;
 }
 
 /** Bytes of streamed output kept for the tests_ran parse (the 2MB log would truncate the summary). */
@@ -703,6 +712,35 @@ function reused(file: string, label: string, cmdSha: string, maxAgeHours: number
   return true;
 }
 
+/** record-ci's record line, the one lib/ci-carry.ts recordCiResult reads. */
+const recordedCiLine = (r: EvidenceRecord): string =>
+  `gstack-evidence: recorded label=${r.label} exit=0 tests_ran=${r.tests_ran}${r.tests_unit ? ` unit=${r.tests_unit}` : ""} log=- source=ci runs=${r.runs!.join(",")} policy=${r.policy}${r.skipped_here ? ` skipped_here=${r.skipped_here.files.length} tests_ran_here=${r.skipped_here.tests_ran}${r.skipped_here.not_owed ? ` not_owed_here=${r.skipped_here.not_owed.length}` : ""}` : ""}`;
+
+/**
+ * record-ci's reuse (GST-1795): the label's newest ledger row stands only when it is the CI row this record-ci would write again
+ * (every `want` field equal: commit, clean tree, command, verified runs, profiles, jobs, base policy, count, unit, not-owed reason),
+ * it grades FRESH, it carries no test-lane exception, and its per_file remainder is the same files, each file's newest local run at
+ * this tree written before that row (the run the row was validated from) and a pass under this runtime. Anything else records afresh.
+ * The caller has already verified the run itself live.
+ */
+function reusableCiRow(label: string, want: Partial<EvidenceRecord>, remainder: string[], perFile: string | undefined): EvidenceRecord | null {
+  let rows: EvidenceRecord[] = [];
+  try { rows = readJsonl<EvidenceRecord>(ledgerPath().file); } catch { return null; }
+  const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  const at = rows.findLastIndex((x) => x.label === label);
+  const r = rows[at];
+  if (!r || r.source !== "ci" || r.exception || r.dirty !== false || r.tree !== want.wtree) return null;
+  if (!Object.entries(want).every(([k, v]) => same(r[k as keyof EvidenceRecord], v))) return null;
+  if (gradeRecord(r, { maxAgeHours: DEFAULT_MAX_AGE_HOURS, allowPaths: [], wtreeNow: want.wtree }).verdict !== "FRESH") return null;
+  if (!same(r.skipped_here?.files ?? [], remainder)) return null;
+  const identity = identityDigest();
+  const passedHere = (file: string) => {
+    const i = rows.findLastIndex((x) => x.label === `${label}.skipped` && x.source === undefined && x.cmd_sha256 === sha256(perFileCommand(perFile!, [file])) && x.wtree === want.wtree);
+    return i >= 0 && i < at && rows[i]!.exit === 0 && rows[i]!.identity === identity;
+  };
+  return remainder.every(passedHere) ? r : null;
+}
+
 /**
  * `record-ci`: carry a lane from CI. Its command must be a key of the base branch's ship_lanes_from; the run is found and
  * verified here (lib/ci-carry.ts) at HEAD's clean tree, so no caller supplies run ids, a test count or a tree. Never runs the lane;
@@ -717,12 +755,14 @@ async function cmdRecordCi(argv: string[]): Promise<number> {
   const label = raw === undefined ? undefined : ledgerLabel(raw);
   const base = get("--base");
   const command = sep < 0 ? "" : argv.slice(sep + 1).join(" ");
-  if (!label || !base || !command || opts.length !== 4) {
+  const standIn = opts.includes("--remote-gate-stands-in");
+  if (!label || !base || !command || opts.length !== (standIn ? 5 : 4)) {
     console.error("usage: gstack-evidence record-ci --label <L> --base <base> -- <command>");
     return 2;
   }
-  const none = (reason: string, detail: string) => {
+  const none = (reason: string, detail: string, diagnosis: string[] = []) => {
     console.error(`CARRY_NONE: ${reason}: ${detail}`);
+    for (const d of diagnosis) console.error(`CARRY_DIAGNOSIS: ${d}`);
     console.error(`gstack-evidence record-ci: label=${label} not carried; nothing recorded`);
     return 1;
   };
@@ -738,8 +778,55 @@ async function cmdRecordCi(argv: string[]): Promise<number> {
   const tree = git(["rev-parse", "HEAD^{tree}"]);
   if (!head || !tree) return none("no_head", "HEAD is unreadable");
   const wtree = () => { const fp = wtreeFingerprint({ cwd, timeoutMs: 30000 }); return "tree" in fp ? fp.tree : null; };
-  const v = findCarry(check, { profiles: m.profiles, head, tree, wtree, ...mappingCoverage(m, cwd) });
-  if (!v.ok) return none(v.reason, v.detail);
+  const grants = readTestLaneExceptions(cwd);
+  const atHead = grants.filter((g) => g.head === head);
+  const v = findCarry(check, { profiles: m.profiles, head, tree, wtree, ...mappingCoverage(m, cwd), ...(atHead.length ? { excepted: atHead } : {}) });
+  const elsewhere = grants.filter((g) => g.head !== head).map((g) => `${g.approval} at ${g.head.slice(0, 12)}`);
+  if (!v.ok && v.reason === "inventory_failed" && standIn) {
+    const { remoteGateStandIn } = await import("../lib/remote-gate-stand-in");
+    const gate = remoteGateStandIn(git(["rev-parse", "--show-toplevel"]) ?? cwd, tree, base);
+    if (!gate.ok) return none(v.reason, v.detail, [`no cleared pregate.json/remote_gate stands in: ${gate.why}`]);
+    let gatePaths: ReturnType<typeof ledgerPath>;
+    try {
+      gatePaths = ledgerPath();
+      mkdirpSync(gatePaths.dir);
+    } catch (e: any) {
+      console.error(`gstack-evidence record-ci: ledger setup failed (${e?.message ?? e}); nothing recorded`);
+      return 1;
+    }
+    const row: EvidenceRecord = { ts: gate.clearedAt, label, command, cmd_sha256: sha256(command), exit: 0, duration_s: 0, commit: head, tree, dirty: false, wtree: tree, tests_ran: gate.tests, source: "remote_gate", remote_gate: gate.receipt, policy: loaded.label };
+    appendJsonl(gatePaths.file, row, { mode: 0o600 });
+    console.error(`CARRY_STANDIN: ${v.reason}: ${v.detail}`);
+    console.error(`gstack-evidence: recorded label=${label} exit=0 tests_ran=${gate.tests} log=- source=remote_gate receipt=${gate.receipt}`);
+    return 0;
+  }
+  if (!v.ok) return none(v.reason, `${v.detail}${v.reason === "inventory_uncovered" && !atHead.length && elsewhere.length ? `; test-lane exception ${elsewhere.join(", ")} binds another head, not HEAD ${head.slice(0, 12)}` : ""}`, v.diagnosis);
+  const runs = v.runs.map((r) => `${r.run_id}/${r.run_attempt}`);
+  const prior = v.excepted?.length ? null : reusableCiRow(label, { commit: head, wtree: tree, cmd_sha256: sha256(command), runs, profiles: m.profiles, policy: loaded.label, jobs: m.jobs, tests_ran: v.tests, tests_unit: v.unit, not_owed: v.notOwed }, v.remainder ?? [], m.per_file);
+  if (prior) {
+    console.error(recordedCiLine(prior));
+    if (prior.not_owed) console.error(`gstack-evidence: not owed: ${prior.not_owed}`);
+    console.error(`CI_RECORD_REUSED: label=${label} runs=${runs.join(",")} tree=${tree.slice(0, 12)} policy=${loaded.label} (the ledger's CI row for this exact tree, run and selection; nothing ran here)`);
+    return 0;
+  }
+  let exception: BoundLaneException | undefined;
+  const grant = atHead.find((g) => g.approval === v.exceptedBy);
+  if (v.excepted?.length && grant) {
+    const preLabel = `${label}.excepted`;
+    console.error(`gstack-evidence record-ci: test-lane exception ${grant.approval}: preflighting ${v.excepted.length} uncovered file(s) here at ${head.slice(0, 12)}, one at a time (label=${preLabel})`);
+    let ran = 0;
+    for (const file of v.excepted) {
+      const preCommand = perFileCommand(m.per_file!, [file]);
+      const exit = await cmdRun(["--label", preLabel, "--", preCommand]);
+      let rows: EvidenceRecord[] = [];
+      try { rows = readJsonl<EvidenceRecord>(ledgerPath().file); } catch { rows = []; }
+      const n = rows.findLast((r) => r.label === preLabel && r.source === undefined && r.cmd_sha256 === sha256(preCommand) && r.wtree === tree)?.tests_ran ?? "unknown";
+      if (exit !== 0 || typeof n !== "number" || n <= 0) return none("exception_preflight_failed", `test-lane exception ${grant.approval}'s preflight of ${file} ${exit !== 0 ? `exited ${exit}` : `ran ${n} tests`} here (label=${preLabel}); the exception binds only when each of ${v.excepted.join(", ")} runs and passes at HEAD`);
+      ran += n;
+    }
+    exception = { ...grant, preflight: { label: preLabel, tests_ran: ran } };
+  }
+  const testsRan = exception && typeof v.tests === "number" ? v.tests + v.excepted!.length : v.tests;
   let here: EvidenceRecord["skipped_here"];
   if (v.remainder?.length) {
     const hereLabel = `${label}.skipped`;
@@ -760,11 +847,13 @@ async function cmdRecordCi(argv: string[]): Promise<number> {
     }
     here = { label: hereLabel, files: v.remainder, tests_ran: ran, ...(notOwed.length ? { not_owed: notOwed } : {}) };
     if (notOwed.length) console.error(`gstack-evidence record-ci: not owed here: ${notOwed.length} remainder file(s) skipped every test on CI and here too (env- or tool-gated by design): ${notOwed.join(", ")}`);
+  }
+  if (here || exception) {
     for (const e of v.runs) {
       const changed = runChanged(check.deps, e.run_id, e.run_attempt);
       if (changed) return none("run_changed", changed);
     }
-    if (wtree() !== tree) return none("tree_changed", `the working tree changed while the per_file run of label=${hereLabel} ran`);
+    if (wtree() !== tree) return none("tree_changed", `the working tree changed while the per_file run of label=${here?.label ?? exception!.preflight.label} ran`);
   }
   let paths: ReturnType<typeof ledgerPath>;
   try {
@@ -774,14 +863,14 @@ async function cmdRecordCi(argv: string[]): Promise<number> {
     console.error(`gstack-evidence record-ci: ledger setup failed (${e?.message ?? e}); nothing recorded`);
     return 1;
   }
-  const runs = v.runs.map((r) => `${r.run_id}/${r.run_attempt}`);
   const rec: EvidenceRecord = {
     ts: new Date(v.runs.map((r) => r.finished_at).sort()[0]!).toISOString(), label, command, cmd_sha256: sha256(command), exit: 0, duration_s: 0,
-    commit: head, tree, dirty: false, wtree: tree, tests_ran: v.tests, source: "ci", runs, profiles: m.profiles, policy: loaded.label, ...(m.jobs ? { jobs: m.jobs } : {}), ...(v.unit ? { tests_unit: v.unit } : {}), ...(v.notOwed ? { not_owed: v.notOwed } : {}), ...(here ? { skipped_here: here } : {}),
+    commit: head, tree, dirty: false, wtree: tree, tests_ran: testsRan, source: "ci", runs, profiles: m.profiles, policy: loaded.label, ...(m.jobs ? { jobs: m.jobs } : {}), ...(v.unit ? { tests_unit: v.unit } : {}), ...(v.notOwed ? { not_owed: v.notOwed } : {}), ...(here ? { skipped_here: here } : {}), ...(exception ? { exception } : {}),
   };
   appendJsonl(paths.file, rec, { mode: 0o600 });
-  console.error(`gstack-evidence: recorded label=${label} exit=0 tests_ran=${v.tests}${v.unit ? ` unit=${v.unit}` : ""} log=- source=ci runs=${runs.join(",")} policy=${loaded.label}${here ? ` skipped_here=${here.files.length} tests_ran_here=${here.tests_ran}${here.not_owed ? ` not_owed_here=${here.not_owed.length}` : ""}` : ""}`);
+  console.error(recordedCiLine(rec));
   if (v.notOwed) console.error(`gstack-evidence: not owed: ${v.notOwed}`);
+  if (exception) console.error(`TEST_LANE_EXCEPTION: ${testLaneExceptionText(exception)}`);
   return 0;
 }
 
@@ -804,7 +893,7 @@ function cmdCarried(argv: string[]): number {
   for (const r of records) latest.set(r.label, r);
   const carried = [...latest.values()].filter((r) => r.source === "ci" && !!wtree && r.wtree === wtree && Array.isArray(r.runs) && typeof r.policy === "string" && r.policy.startsWith(policyRef)
     && gradeRecord(r, { maxAgeHours: DEFAULT_MAX_AGE_HOURS, allowPaths: [], wtreeNow: wtree }).verdict === "FRESH")
-    .flatMap((r) => r.runs!.map((ref) => { const [run, attempt] = ref.split("/").map(Number); return { lane: r.label, run, attempt, tree: r.wtree! }; }));
+    .flatMap((r) => r.runs!.map((ref) => { const [run, attempt] = ref.split("/").map(Number); return { lane: r.label, run, attempt, tree: r.wtree!, ...(r.exception ? { exception: r.exception } : {}) }; }));
   if (argv.includes("--json")) console.log(JSON.stringify(carried));
   else for (const c of carried) console.log(`CI_CARRIED: ${c.lane} run=${c.run}/${c.attempt} tree=${c.tree.slice(0, 12)}`);
   return 0;
@@ -931,7 +1020,7 @@ function cmdCheck(argv: string[]): number {
       continue;
     }
     const testsRan = typeof latest.tests_ran === "number" || latest.tests_ran === "n/a" ? latest.tests_ran : "unknown";
-    const ci = latest.source === "ci" && Array.isArray(latest.runs) ? ` source=ci runs=${latest.runs.filter((s) => /^\d+\/\d+$/.test(s)).join(",")}` : "";
+    const ci = latest.source === "ci" && Array.isArray(latest.runs) ? ` source=ci runs=${latest.runs.filter((s) => /^\d+\/\d+$/.test(s)).join(",")}` : latest.source === "remote_gate" ? " source=remote_gate" : "";
     const detail = `label=${label} exit=${latest.exit} tests_ran=${testsRan}${latest.tests_unit === "files" ? " unit=files" : ""} ts=${latest.ts}${latest.log_path ? ` log=${latest.log_path}` : ""}${ci}`;
     const { verdict, reason } = gradeRecord(latest, { maxAgeHours, expectCmd, allowPaths, wtreeNow });
     console.log(`EVIDENCE: ${verdict} ${detail}${reason ? ` reason=${reason}` : ""}`);

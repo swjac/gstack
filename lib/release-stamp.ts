@@ -15,7 +15,7 @@ import { effectiveBump, readFragments } from './changelog-fragments';
 import { restamp, versionAtRef, type RestampResult } from './restamp';
 import { matchesAny, type ShipPolicy } from './ship-policy';
 import { buildReceipt } from './tree-receipt';
-import { regeneratedAtBase } from './version-gate-train';
+import { regeneratedAtBase } from '../crew/lib/version-gate-train';
 import { bumpVersion, cmpVersion, fmtVersion, parseVersion, versionWidth } from './version-source';
 
 export const RELEASE_BRANCH = /^release\/(\d+(?:\.\d+){2,3})$/;
@@ -127,7 +127,7 @@ export function openRelease(o: OpenOptions): OpenResult {
     lines.push(`RELEASE: ${stamp.oldVersion} -> ${version} at origin/${o.base} ${baseSha.slice(0, 12)}`);
     if (o.dryRun) return { ok: true, version, branch, lines: [...lines, stamp.diff ?? ''] };
     const folded = /folded (.+?)(;|$)/.exec(stamp.stages.find(s => s.name === 'changelog')?.detail ?? '')?.[1] ?? 'see the CHANGELOG diff';
-    for (const step of [['add', '-A', '--', ...(stamp.files ?? [])], ['commit', '-q', '-m', `v${version} release: fold the changelog fragments`]]) {
+    for (const step of [['add', '-A', '--', ...(stamp.files ?? [])], ['commit', '-q', '-m', `Release v${version}`]]) {
       const r = git(dir, step);
       if (!r.ok) return fail('RELEASE_STAMP_INVALID', `git ${step[0]} failed in the release worktree: ${r.err.split('\n')[0]}`);
     }

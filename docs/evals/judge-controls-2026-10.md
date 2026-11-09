@@ -1,5 +1,7 @@
 # Workflow-judge control bundles (C1), pre-registered 2026-10-04
 
+> Historical record. The workflow clarity judges and `scripts/judge-controls.ts` were removed in GST-1371 (2026-11-04); the evals that check real outcomes replace them.
+
 Purpose: learn whether the workflow judges that produced low samples in the eight
 wave censuses (37174266054 … 37198445662) can separate a sound workflow from a
 broken one. Score compression at 4 is a hypothesis; these controls test it.
@@ -11,7 +13,7 @@ builder, model, options and pass floors of its eval (clarity ≥ 3, completeness
 actionability ≥ 4 on the 3-sample mean), built by `scripts/judge-controls.ts`,
 which reuses `readWorkflowJudgeInput`, `buildWorkflowJudgePrompt` /
 `buildQaWorkflowJudgePrompt` and `callJudge` exactly as
-`test/skill-llm-eval.test.ts` and `scripts/judge-calibration-configs.ts` do.
+`test/skill-llm-eval.test.ts` and `crew/scripts/judge-calibration-configs.ts` do.
 
 ## Bundles and expected outcomes
 

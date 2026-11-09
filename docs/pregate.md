@@ -39,7 +39,24 @@ read from the branch under `--policy-from head`. So an allowlist entry or a
 `[]` declaration a branch adds counts only once it is on the base, and a lane it
 adds counts on the base policy only once it lands; `PREGATE_NO_LANE`'s fix line
 says so when the branch edits the file
-([troubleshooting](troubleshooting.md#pregate-no-lane-own-policy)). An unresolvable base exits 3 with
+([troubleshooting](troubleshooting.md#pregate-no-lane-own-policy)).
+<a id="accept-head-policy"></a>/ship's reruns on the final tree (`gstack-ship-release accept`, and `finish`
+when it reruns the whole pregate on the stamped tree) choose the policy themselves
+(GST-1595). When the branch's `pregate.json` differs from the copy it forked from
+(the base tip's when the fork has none) in nothing but added test lanes, and
+`.gstack/generated.json` matches the base tip's copy (a head-policy run loads the
+regen registry from the branch, so a copy that main changed after the fork keeps
+the base policy), they pass `--policy-from head` and print
+`POLICY: head (unreviewed) .gstack/pregate.json: adds <n> test lane(s) over
+origin/<base> and changes nothing else, so the gate is only stricter`. So a PR
+that adds a runtime file and its own lane line passes `accept` without a
+lanes-only PR first (gstack-evals #240). Any other difference (a removed or
+shrunk lane, a `[]` declaration, `warn`, `timeout_s`, `ship_lanes_from`, any
+other key, a changed `generated.json`, a file that does not parse) keeps the
+base policy as before, with `POLICY: base origin/<base>:.gstack/pregate.json (the
+branch's copy <what differs>, so it does not count here; land it on <base>
+first)`. A branch that leaves the file alone prints no `POLICY:` line.
+An unresolvable base exits 3 with
 `POLICY_SOURCE_UNAVAILABLE`. Globs are repo-relative (no `..`, no absolute
 paths, at most 64 per list); commands are one line under 512 bytes.
 
@@ -168,6 +185,8 @@ Review each entry before committing the file on the base branch.
 
 `{ "tests": [globs] }` names whole-tree tests that scan every file of a kind (tripwires, ratchets, conformance and fixture inventories). A diff-selected run never maps a touched file to them, so they used to pass the selected gate and then fail CI (GST-98). When a branch selects any test, owes a lane, or edits this file, the `lanes` selection adds every tracked test file a glob matches. `--explain` prints each one as `<test> (always_run, .gstack/always-run.json)`, and a glob that matches no test as `<glob> matches no test file`. A docs-only branch adds nothing.
 
+The globs are the union of the working tree's list and the merge base's list (GST-233), so a branch can add entries but never drop one main already has. A test only the merge base's list names prints as `<test> (always_run, merge base .gstack/always-run.json)`. `scripts/test-impact.ts` takes the same union with its `--base` ref and never reuses a result for those tests ([test-impact.md](test-impact.md)).
+
 The list lives in its own file, not in `pregate.json`, because older pregate readers reject unknown keys there. A repository that ignores `.gstack/` (gstack does) tracks the file with `git add -f`, as it does `pregate.json`. A missing file means an empty list. A file that is not JSON, or whose `tests` is not a list of non-empty strings, stops the check with that message. gstack's own list matches 16 test files; the 13 with a seed in `scripts/free-test-durations.json` (recorded 2026-10-19) total about 13 s there, and `bun-entry-isolation`, `launch-env-echo-ratchet` and `review-packets-removed` have no seed yet.
 
 ## `gstack-pregate`
@@ -201,7 +220,9 @@ Two stages with separate clocks, both printed:
   file is read whole from disk. A file over the size limit, or whose full diff
   does not parse, is scanned on its added lines alone, without that context.
 - `strays`: a new file at the repository root, a new top-level directory, or a
-  scratch name (`zz-*`, `tmp*`, `scratch*`) or editor leftover (`*.orig`,
+  scratch name (`zz-*`, or `tmp` or `scratch` as the whole name stem, optionally
+  numbered: `tmp.js`, `tmp2.js`, `tmp_1.txt`, `scratch.md`, but not
+  `tmp-watch.js`, `tmpfs-mount.js`, `scratchpad.ts` or `tmp-repro.ts`) or editor leftover (`*.orig`,
   `*.rej`, `*.swp`, `*.swo`, `*.bak`, `*.tmp`, `*~`, `.DS_Store`, `Thumbs.db`)
   anywhere.
 - `literals`: for every changed exported constant or named timeout/retry
@@ -245,6 +266,13 @@ Two stages with separate clocks, both printed:
   this branch` when the merge-base file lacks the marker. The policy has no
   waiver key, so neither a base nor a pushed `pregate.json` can widen it.
 
+- `policy-floor`: on a branch that changes `.gstack/ship-policy.json`, a
+  `min_gstack_version` above the newest stable gstack release fails
+  (`POLICY_FLOOR_ABOVE_STABLE`, naming the floor and the release), since every
+  stable-channel lane would refuse that policy; when the release cannot be
+  resolved (no release tag on gstack's origin, no local stable ref or tag) it
+  warns (`STABLE_RELEASE_UNKNOWN`). The same rule as `gstack-ship-policy
+  validate` ([ship-policy.md](ship-policy.md)).
 - `timing`: added or changed test lines that compare an elapsed wall-clock or
   CPU time against a bound, or sleep and then assert, print
   `TIMING_ASSERTION: <file>:<line> <pattern>` and a
@@ -508,7 +536,9 @@ the supervision above. Close the obligation one of four ways:
   its preflight checks) and the VM only as the opt-in (under `--no-ci-carry` it
   names the VM route); or
 - after running it, `gstack-pregate clear --remote pregate.json/remote_gate
-  --receipt <file>` with the gate's output, validated as `--remote` validates it
+  --receipt <file>` with the gate's output (or a `gstack-pregate --remote` log,
+  where the line sits under `lanes:`, accepted only when that log's lanes check
+  reads `requires-remote`), validated as `--remote` validates it
   (a run URL is refused, `PREGATE_RECEIPT_INVALID` for a bad receipt; a receipt
   for a tree that differs from this one only by the repo's stamp rule is
   accepted and recorded, see [below](#remote-gate-stamp-only)), or
@@ -793,10 +823,9 @@ once:
   does a file whose log hit the 2 MB cap, since a cut log's last summary may not
   be the run's. Any of these refusals runs the whole lane here. An entry with no `per_file` refuses as
   `inventory_skipped`, naming the files, and the lane runs here whole. A partly
-  skipped file ran tests and stays covered. gstack's `bun run test` lane
-  declares `per_file`, and its Free Tests writer starts emitting the list in a
-  follow-up pull request, so the runner is in place on the base before any run
-  lists a skipped file. A `tree.json`
+  skipped file ran tests and stays covered. gstack's own Free Tests writer
+  (`scripts/ci-tree-reuse.ts record`) emits the list from complete per-file
+  counts, and gstack's `bun run test` lane declares `per_file`. A `tree.json`
   without the key (older writers, other repos) is read as before, with every
   listed file counted as run; add the list to your writer to close that gap.
   The remote gate's clearance does not use it: that gate runs on a Linux runner
@@ -1109,6 +1138,46 @@ different environment than the key. An alias that repeats a key or another
 entry's alias is invalid config. The ledger row binds the command the lane
 actually ran.
 
+<a id="ship-lanes-remote-gate"></a>**A lane whose inventory refuses its own tree.** A repo's inventory command
+may refuse a tree on purpose: gbrain's `runs_may_attest` exits 1 for a tree
+that changes CI-reuse files (its workflows, `scripts/ci-reuse.ts`), so no CI
+run can attest to it (GBRA-345, gbrain #8727). When the carry refuses as
+`inventory_failed`, /ship's lanes (finish, accept and Step 5, through
+`gstack-evidence record-ci --remote-gate-stands-in`) look for a cleared remote
+gate for the same tree, and it stands in for the lane only when every one of
+these holds (`lib/remote-gate-stand-in.ts`, GST-1688):
+
+- `.gstack/tmp/pregate.json` was recorded for HEAD's exact tree and
+  `gstack-pregate verify` accepts it now;
+- its `pregate.json/remote_gate` obligation holds the gate's own report,
+  `remote-gate tree=<HEAD's tree> tests=<n>` with n above 0 (from
+  `gstack-pregate --remote` or `clear --receipt`), run on that tree rather than
+  accepted from a stamp-only predecessor, cleared within the last 24 hours;
+- that record's `base` and `policy` both name `origin/<base>@`: the pregate
+  run was against the same base branch, under that branch's own
+  `.gstack/pregate.json`, the policy whose `ship_lanes_from` maps the lane.
+
+Then the ledger records the lane as `source=remote_gate` with that receipt and
+the gate's test count, timed at the clear, and accept prints
+`CI_CARRY: remote_gate label=<lane> receipt=<receipt> (inventory_failed: …; the
+cleared pregate.json/remote_gate for this exact tree stands in)` and `LANE: <lane>
+satisfied by remote_gate receipt=<receipt>`. The receipt's `ci_carried` never
+lists it, since no CI run carried it. Otherwise the lane stops as before, and a
+`CARRY_DIAGNOSIS: no cleared pregate.json/remote_gate stands in: <why>` line
+says which rule failed: a gate for an earlier tree, a receipt that names
+another tree, a record `verify` refuses, or none at all. Other refusals
+(`inventory_uncovered`, `no_tests`, …) never fall back to the gate.
+
+One limit: the record cannot say whether the gate ran the whole suite or only
+the files pregate selected and handed it (`PREGATE_FILES_FILE`; gbrain's gate
+runs its whole corpus either way). The receipt carries a test count, not a file
+list, so a gate that ran only the selection can stand in for a full-suite lane.
+
+A run whose `tree.json` lists no files, which is what a rerun of only the
+failed jobs uploads, refuses as `no_tests` and says to dispatch a fresh full
+run of the profile's workflow (`gh workflow run <workflow> --ref <branch>`)
+and carry from that.
+
 **What `tests_ran` means on a carried lane.** No carried lane reports the whole
 run's count. A lane mapped by `inventory` reports how many of its inventory
 files the runs' `tree.json` covers, labeled as a file count (`tests_ran=14
@@ -1199,7 +1268,85 @@ each mapped lane from the green run at that exact tree, reuses or runs the rest,
 checks every lane FRESH and reruns the pregate there, whose tests stage carries
 the same run. `gstack-ship-receipt write` records the carried runs as
 `ci_carried: [{ lane, run, attempt, tree }]`, and the `SHIP_RECEIPT:` line names
-them (`ci_carried=<lane>:<run>/<attempt>`).
+them (`ci_carried=<lane>:<run>/<attempt>`). Each `record-ci` gets the base
+policy's [`ci_record_timeout_s`](ship-policy.md#ci-record-timeout) (600 s by
+default, 3600 s at most), and accept prints it as `CI_RECORD_TIMEOUT:`.
+
+<a id="record-ci-reuse"></a>**record-ci reuses its own row at the same tree (GST-1795).** Step 5's
+carry and accept both call `record-ci`, so at an unchanged pushed tree the
+second call would run the `per_file` remainder again. Instead, after it
+verifies the run live, `record-ci` reuses the label's newest ledger row when
+that row is the CI row it would write again: the same commit, clean tree,
+command, verified runs (id and attempt), profiles, jobs, base policy, covered
+count, unit and not-owed reason, FRESH within 24 hours, with no test-lane
+exception, and the same remainder files, each file's newest `<lane>.skipped`
+run at this tree written before that row and a pass under this runtime (a
+remainder run after the CI row, such as a zero-test rerun record-ci refused,
+vetoes reuse). It runs nothing here, prints
+`CI_RECORD_REUSED: label=<lane> runs=<id>/<attempt> tree=<tree12> policy=<policy>`
+after its record line, and accept's lane line ends `(reused the CI record at
+tree <tree12>)`. Any difference, a newer row for the label, or a run that is no
+longer green records afresh (or refuses) as before.
+
+<a id="accept-local-tests"></a>**When accept's final pregate runs the tests here (GST-1606).** The final
+pregate's tests stage carries only under a base run profile whose `os` matches
+this machine and whose workflow holds a lane this machine runs. A lane carried
+through `ship_lanes_from` needs neither, so a profile without `os` carries
+every lane and still leaves the tests stage to run its whole selection here
+(harness-evals #271 ran 3,666 tests that way). accept then prints one line:
+`CI_CARRY: none (<reason>); the final pregate's tests stage ran here instead:
+tests <verdict> in <n>s`. The run is correct, only slower. Adding `"os":
+"Linux"` (or this machine's OS) to the profile on the base branch lets the
+next accept carry the tests stage too, when the run's `tree.json` covers the
+selection.
+
+<a id="same-tree-clears"></a>**A rerun at the same tree keeps its clears (GST-1627).** accept's final
+pregate reran `gstack-pregate` on the tree the lane had already cleared
+`macos-named-regressions` and `windows-smoke` on from CI runs, and the fresh
+record dropped both receipts, so accept stopped on `requires-remote (2
+uncleared)` and never exited 0 (#4063, GST-1595). Now, when `gstack-pregate`
+writes over a record for the same head, tree, policy source and base branch (the
+base branch may have moved: the policy label's base commit does not count,
+GST-1775), each uncleared
+obligation takes the earlier receipt for the same lane, platform, workflow, job
+and gate command, with its `cleared_by`, stamp-only substitution and flaky exception, as long
+as the earlier obligation listed every test the new one needs. A receipt a
+stamp-only substitution accepted carries only while the base commit is the same:
+the base's stamp rules accepted it, and a moved base may have changed them. Each kept
+receipt prints `PREGATE_CLEAR_KEPT: <lane> receipt=<receipt> (recorded at this
+tree <tree12>; …)` (on stderr under `--json`), and accept relays the lines
+before its `PREGATE:` line. A run without `--base` at the record's head keeps
+that record's base branch rather than `origin/HEAD`'s, and says so on stderr when
+they differ, so a `--stage tests` rerun cannot drop the clears by reading
+another branch (GST-1775). A record for another head or tree keeps nothing,
+so any commit after the clear, even an amend that keeps the tree, needs a new
+clear at the new head: a receipt and its flaky exception were vetted against
+the head they name. A rerun with a
+failed, incomplete or not-installed check also keeps nothing, so a remote gate
+that ran again and timed out stays uncleared. `gstack-pregate verify` checks a
+kept receipt as it checks any other one.
+
+<a id="carry-imported-tests"></a>**An inventory file CI's JUnit tree never lists (GST-1595).** bun registers
+the tests of a test file another test file imports under the importer, so the
+imported file's own JUnit suite never appears in `tree.json` and the carry
+refuses with `inventory_uncovered`. For each such file another inventory file
+imports by a relative path (`import`, `import()`, `require`), the refusal adds
+`CARRY_DIAGNOSIS: bun registers <imported> under <importer>; its JUnit suite
+won't appear` (`lib/ci-carry.ts` `importedTestLines`), printed by `gstack-evidence
+record-ci`, `gstack-ship-preflight` and `accept`; the remote gate's
+`inventory_uncovered` reason carries the same words. The fix is usually to move
+the shared code out of the `.test.` file. When that can't happen in this PR,
+the owner can grant a [test-lane exception](ship-policy.md#test-lane-exceptions)
+for exactly those files at the pushed head: `record-ci` then runs each of them
+here, one file at a time, with the entry's `per_file` runner (label
+`<lane>.excepted`) and carries the lane only when every file's run passes with a
+counted test; the lane's `tests_ran` counts those files beside the ones CI
+covered. A failed or zero-test run of any file refuses with
+`exception_preflight_failed`, and a grant at another head or for another file
+set binds nothing. The CI row and the receipt's `ci_carried` entry
+keep the grant and the preflight (`exception`), and `accept` prints
+`TEST_LANE_EXCEPTION: <files> at <head12>: preflight <label> ran <n> test(s)
+here; granted by <who> at <time>: <reason> (approval <id>)`.
 
 **`gstack-ci-carry`.** `find [--profile <name>]… [--command <exact lane command>
 --allow-repo-commands]` prints the verdict for HEAD; `wait [--timeout <s>]`
@@ -1284,6 +1431,114 @@ uploads no `tested-tree`, so the main push after the merge finds the source run
 on the head (a branch dispatch) or runs every job. The usual case is a branch
 that already holds main's tip. Dispatch Free Tests on the branch, and the
 pull request run that follows reuses it instead of running the suite again.
+
+<a id="docs-only"></a>
+## Docs-only pull requests (R81)
+
+A pull request whose every changed path is human-facing documentation skips the test
+suites. It runs the docs lane instead: links on the lines it added resolve, generated pages
+are fresh, the credential scan passes, and the tests that read docs by directory run. Pushes
+to the base branch always run the full suites.
+
+**One classifier.** `lib/docs-only.ts` (`bin/gstack-docs-only`) decides the class for CI,
+pregate, `gstack-ci-carry`, /ship's lanes and land. A path is docs only when every one of
+these holds:
+
+- It is a plain file (mode 100644). Executables, symlinks, submodules and type changes refuse.
+- It is on the allowlist, matched case-sensitively: root `README.md`, `docs/**/*.md`, `changelog.d/*.md`, plus the
+  repository's own globs from the base branch's `docs_only.allow` ([below](#repo-docs-paths)).
+- review-depth's `classifyPath` calls it docs, so agent prose, skill directories and policy docs stay code.
+- It matches no denylist entry. The denylist covers agent-instruction names matched case-insensitively
+  (`SKILL.md`, `AGENTS.md`, `CLAUDE.md`, `ETHOS.md`, `CREW.md`, `captain.md`, `factory.md`, `pregate.md`,
+  `unattended.md` and others), `*-policy.md`, preferences, `sections/`, `templates/`, `skills/`, `prompts/` and
+  `*prompt.md`, `*.tmpl`, hidden directories (`.github/`, `.gstack/`), pinned results (any `evals/` or `inventory/`
+  directory), preregistrations, every output in `.gstack/generated.json`, and the repository's `docs_only.deny`.
+  The list lives in `lib/ship-policy-docs-only.ts`, and no repository setting can override it.
+- No tracked file outside human prose names its path. A script, test, workflow or skill that reads a doc pins it.
+  `CHANGELOG.md`, `TODOS.md` and other allowlisted docs don't pin. The match is a substring match, so it errs
+  toward pinning.
+
+A rename needs both sides to pass, and a deletion needs the old path to pass. An empty diff, an
+unknown ref or any git failure is never docs-only: the CLI prints `DOCS_ONLY: error (DOCS_ONLY_ERROR …)`,
+exits 2 and writes `docs_only=false` ([troubleshooting](troubleshooting.md#docs-only-error)).
+
+**Tests that read docs by directory.** A literal-path scan can't see a test that walks `docs/` or
+lists every tracked file. `DOCS_READER_TESTS` in `lib/docs-only.ts` names them (for example
+`test/docs-config-keys.test.ts`), and the docs lane runs the ones whose tree the change touches.
+`test/docs-only.test.ts` fails on a new reader that is in neither `DOCS_READER_TESTS` nor `DOCS_READER_EXEMPT`.
+
+**CI.** In `free-tests.yml` and `windows-smoke.yml`, a `docs-scope` job checks out the merge ref
+with `fetch-depth: 2` and runs the base branch's classifier (`.github/actions/docs-scope`) on
+`HEAD^1..HEAD`. That is the exact tree CI tests, and a branch can't change the classifier that judges it.
+Each suite job skips only when `docs-scope` succeeded and said docs-only, so a crashed classifier runs
+everything. A required check that is itself the suite, `windows-smoke`, always runs and skips its steps
+instead (`env.DOCS_ONLY`), because gstack's land counts only a check that concluded success, never a skipped
+one. `docs-lane` runs `scripts/check-doc-links.ts --base HEAD^1` and the docs reader tests. The required
+`free-tests` aggregator always runs. On a docs-only pull request it passes only after `docs-lane` passed, and it
+records no `tested-tree`, so a push to main never reuses that run. Use the same jobs in another
+repository: copy `.github/actions/docs-scope`, add a `docs-scope` job, and gate each suite job with
+`${{ !cancelled() && !(needs.docs-scope.result == 'success' && needs.docs-scope.outputs.docs_only == 'true') }}`.
+Never use a workflow-level `paths-ignore`: a required check that never starts stays pending.
+
+**Pregate and /ship.** On a docs-only change the `lanes` check runs the docs lane in place of the
+test lanes and owes no remote gate. The `regen` and `secrets` checks run as always. `ci-reuse/free-tests`
+declares `docs-scope` as its `skippable` gate. A pull request run that skipped every suite carries as not
+owed (`CI_CARRY: accepted ci-carry tree=… not_owed=docs-only`), but only when this checkout's classifier
+also calls the head docs-only. Without that check, the run is never evidence (`artifact_missing`).
+
+**Land.** `land.docs_only_skip` in `.gstack/ship-policy.json` names the `merged_checks` commands land
+skips for a docs-only pin, such as the test list, keeping typecheck and the freshness check. Land keeps every
+check when a non-docs file on the base tip names a changed doc, or reads the directory of a repo-admitted one
+([below](#repo-docs-paths)) where the pin had no such reader, because the pin merges onto that tip. Releases up
+to 1.98.0.0 refuse the key as unknown, so `validate` refuses it until `min_gstack_version` reaches
+`LAND_DOCS_ONLY_SKIP_KEY_VERSION` (lib/ship-policy-keys.ts). To turn it on (GST-1968), use one pull request, after a
+stable release carries the key: add `docs_only_skip`, raise `min_gstack_version` to that release, and check that
+`gstack-ship-policy validate` prints `POLICY_VALID` and a `MIN_READER` no newer than the stable release. Until
+then land runs every merged check on a docs-only pin. gstack's own policy leaves the key off.
+
+<a id="repo-docs-paths"></a>
+### Your repository's own docs paths (`docs_only`)
+
+A repository whose human docs live outside `docs/` names them in `.gstack/ship-policy.json`:
+
+```json
+"docs_only": { "allow": ["wiki/board/**.md"], "deny": ["wiki/board/drafts/**"], "tests": ["tests/wiki.test.ts"] }
+```
+
+Every check above still applies to a repo-allowed path: its mode, the built-in deny list, review-depth's
+`classifyPath` (a top-level directory holding a `SKILL.md` stays agent prose), generated outputs, renames on both sides, and
+the reference scan (a script or test naming the path pins it; a repo-allowed doc naming another does not).
+
+- **Base only.** The classifier reads the block with git from the base branch tip (CI: the merge commit's first
+  parent; pregate and `gstack-ci-carry`: `origin/<base>`; land: the tip it merges onto), while the diff still starts
+  at the merge base, so an allow the base revoked after a branch forked no longer applies. It never reads the head or
+  the working tree, and a pull request that edits `.gstack/ship-policy.json` is never docs-only,
+  so a branch can't allowlist itself.
+- **Narrow patterns.** Each `allow` entry ends in `.md` (not `.mdx`, which can import code), starts with a
+  literal directory or file name, uses only `*` and `**` as wildcards, and passes through no hidden directory and no `skills`, `templates`,
+  `sections`, `specialists`, `prompts`, `test`, `tests`, `spec`, `fixtures`, `lib`, `bin`, `scripts`, `src`,
+  `vendor`, `dist` or `build` segment. `**`, `*`, `*.md`, `**/*.md` and a pattern naming an agent file
+  (`wiki/SKILL.md`, `wiki/**/templates/**.md`) are `POLICY_INVALID` when the policy is read, with an example of a
+  narrow pattern. A path the pattern admits that still passes through one of those directories (`wiki/lib/x.md`)
+  refuses too. `deny` entries only remove paths, built-in ones included.
+- **Fail closed.** A base policy that is not valid JSON, or a `docs_only` block that fails those rules, makes every
+  change not docs-only, with the error as the refusal. An unknown key inside `docs_only` is a warning to
+  `gstack-ship-policy validate`, and the classifier then ignores `allow` (keeping `deny`), so a gstack that
+  doesn't understand a newer key never widens on it.
+- **Readers by directory.** A script that lists a directory reads every post in it, which a literal-path scan can't
+  see. So for a path only `allow` admits, any non-prose tracked file that names one of its directories (`wiki/`,
+  `'wiki'`, `"wiki/board"`, `'./wiki'`, `'../wiki'`, `root + '/wiki'`, `` `${root}/wiki` ``) refuses the change unless it is tied to `tests`: it is one of them, names one, or one
+  names it (with or without its extension). `tests` lists up to 16 test files (`*.test.ts` and the like, never a glob);
+  the docs lane runs them, in pregate and in CI's `tests` output, whenever a repo-admitted path changed. A listed test missing from the classified tree refuses
+  the change, so the docs lane can't pass without it. A prose file
+  that names a directory only describes it; one that names a path still pins that path.
+
+**Turning it on.** Releases up to 1.98.0.0 refuse `docs_only` as an unknown key, and `validate` refuses the block
+until `min_gstack_version` reaches `DOCS_ONLY_KEY_VERSION`. After a stable release carries it, add the block and
+raise `min_gstack_version` to that release in the same pull request; that pull request edits the policy, so it runs
+the full suites. Pushes to the base branch always run the full suites. A repository whose CI runs an older pinned
+gstack, or has no `docs-scope` job, gets the class in pregate, /ship and land only: bump the pin first, then add the
+`docs-scope` job from [CI](#docs-only) (never gating its own docs checks), then add the block.
 
 <a id="flaky-exception"></a>
 ## Owner-granted flaky exception
@@ -1672,8 +1927,8 @@ reason.
 Blocking would stop about a fifth of gstack's and two fifths of gbrain's
 test-touching commits, including correct fixes, so the check warns. A repo
 that wants it stricter keeps the warning in its review rule (the /review
-checklist has the same rule) and /investigate's flake playbook says what to do
-with a timing flake: never raise the bound.
+checklist has the same rule and says what to do with a timing flake: find the
+timing cause and fix it, never raise the bound).
 
 <a id="sealed"></a>
 ## Sealed output: the pre-push hook and `gstack-pregate sealed`

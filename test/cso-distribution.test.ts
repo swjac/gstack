@@ -402,21 +402,23 @@ describe('CSO runtime staging gates', () => {
     expect(job).toBeTruthy();
     const gate = job.steps.find((step: any) => step.run?.trim() === 'bun test --max-concurrency 1 test/cso-docker-integration.test.ts');
     expect(gate.env.GSTACK_CSO_DOCKER_TESTS).toBe('1');
-    expect(raw).not.toContain('secrets.');
+    expect(JSON.stringify(job)).not.toContain('secrets.');
+    expect(raw.match(/secrets\s*(?:\.|\[)\s*['"]?[A-Za-z0-9_-]*|toJSON\(\s*secrets\b/gi)).toEqual(['secrets.TRUNK_API_TOKEN', 'secrets.TRUNK_ORG_API_TOKEN']);
     expect(job.steps.map((s: any) => s.run ?? '').join('\n')).toContain('docker --host unix:///var/run/docker.sock info');
     expect(job['continue-on-error']).not.toBe(true);
     expect(gate['continue-on-error']).not.toBe(true);
     const required = workflow.jobs['free-tests'];
     expect(required.if).toBe('always()');
-    expect(required.needs).toEqual(['reuse', 'free-suite', 'typecheck', 'quick-bun-default', 'cso-macos-launcher', 'macos-named-regressions', 'cso-windows-launcher', 'cso-docker-integration']);
-    expect(job.if).toBe("${{ !cancelled() && (needs.reuse.result != 'success' || needs.reuse.outputs.reused != 'true') }}");
+    expect(required.needs).toEqual(['reuse', 'docs-scope', 'docs-lane', 'free-suite', 'typecheck', 'quick-bun-default', 'cso-macos-launcher', 'macos-named-regressions', 'cso-windows-launcher', 'cso-docker-integration']);
+    expect(job.needs).toEqual(['reuse', 'docs-scope']);
+    expect(job.if).toBe("${{ !cancelled() && (needs.reuse.result != 'success' || needs.reuse.outputs.reused != 'true') && !(needs.docs-scope.result == 'success' && needs.docs-scope.outputs.docs_only == 'true') }}");
     const route = required.steps[0];
     expect(route.id).toBe('route');
     expect(route.env.REUSE_RESULT).toBe('${{ needs.reuse.result }}');
     expect(route.run).toContain('if [ "$REUSE_RESULT" != success ] || [ "$REUSED" != true ]; then');
     const strict = required.steps.find((step: any) => step.run?.includes('test "$CSO_DOCKER_RESULT" = success'));
     expect(strict.env.CSO_DOCKER_RESULT).toBe('${{ needs.cso-docker-integration.result }}');
-    expect(strict.if).toBe("steps.route.outputs.reused != 'true'");
+    expect(strict.if).toBe("steps.route.outputs.skip != 'true'");
     expect(required.steps.indexOf(strict)).toBe(1);
     for (const current of Object.values(workflow.jobs) as any[]) for (const step of current.steps) {
       if (step.uses?.startsWith('oven-sh/setup-bun')) expect(step.uses).toBe('oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6');

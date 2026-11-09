@@ -7,7 +7,7 @@
  * note at each program's end, and the cap is one hard stop. Every --reading
  * takes --credits <cost.credits> beside it.
  *
- *   start   --record <path> [--token-cap <n|none>] [--mode admit|observe] [--meter capy|claude|estimate] [--reading <n>] [--credits <c>]
+ *   start   --record <path> [--token-cap <n|none>] [--mode admit|observe] [--meter capy|claude|estimate] [--reading <n>] [--credits <c>] [--meter-source <jam id>]
  *           [--prior-reading <n>] [--session <id>|--nonce <v>] [--reserve <n>] [--delegate auto|never] [--calibration <file>] [--ledger <path>]
  *   note    --run|--record --step <id> [--label <text>] --reading <n> [--credits <c>] [--dispatched-at <n> [--dispatched-credits <c>] --readers <k>]
  *   check   --run <id>|--record <path> --step <id> --next <id|dispatch:<role>[,<role>...]> [--reading <n>] [--credits <c>] [--prior-reading <n>]
@@ -20,10 +20,11 @@
  *   verify-handoff --in <brief> [--reading <n>] [--session <id>]
  *   return  --run <child> --to <step> [--changed <sections>] [--status complete|refused|incomplete] [--reading <n>]
  *   reconcile --run|--record (--return <file>|--handoff <sha256>) [--reading <n>]
- *   resume  --record <path>|--run <id> [--reading <n>] [--meter <m>] [--session <id>] [--token-cap <n> --approved-by <who> --words <text>]
+ *   resume  --record <path>|--run <id> [--reading <n>] [--credits <c>] [--meter <m>] [--meter-source <jam id>] [--session <id>] [--token-cap <n> --approved-by <who> --words <text>]
  *           [--rebuild-from-record]
  *   close   --run|--record [--reading <n>] [--approved-by <who> --words <text>]
  *   calls   --events <file> [--since <iso>] [--until <iso>]   (the host's transcript items: one CALLS: line, lib/ship-calls.ts)
+ *   calls   --run|--record [--log <file>] [--since <iso>] [--until <iso>]   (the call log the gstack-ship-* bins write: lib/ship-call-log.ts)
  *
  * Exit: 0 continue/delegate · 3 stop (the next step does not start) · 2 usage
  * or validation (stderr). Logic: lib/ship-budget.ts, lib/ship-budget-cli.ts,
@@ -32,6 +33,9 @@
 import { BudgetError } from '../lib/ship-budget';
 import { cmdCalls, cmdCheck, cmdClose, cmdNote, cmdResume, cmdSettle, cmdStart, type Outcome } from '../lib/ship-budget-cli';
 import { cmdHandoff, cmdLaunch, cmdReconcile, cmdReturn, cmdVerifyHandoff } from '../lib/ship-handoff';
+import { logShipCall } from '../lib/ship-call-log';
+
+logShipCall('gstack-ship-budget');
 
 const [command, ...rest] = process.argv.slice(2);
 const ctx = { env: process.env, cwd: process.cwd() };

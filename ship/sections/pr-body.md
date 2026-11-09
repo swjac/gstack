@@ -20,12 +20,20 @@ Write the text into each printed file with your file-write tool (Claude Code's W
    gh pr view <pr-number> --json title -q .title | ~/.claude/skills/gstack/bin/gstack-pr-title-rewrite.sh <new-version> --stdin > "$TITLE_FILE" || exit 1
    ```
    GitLab reads `glab mr view <pr-number> --output json | jq -r .title` into the same pipe.
-2. For a new PR/MR, write `v<NEW_VERSION> <type>: <summary>` into the file with your file-write tool;
-   `<summary>` names what the user gets, not the mechanism.
+2. For a new PR/MR, write `v<NEW_VERSION> <plain change>` into the file with your file-write tool, adding
+   ` (<issue code>)` at the end when the work has one. The front says in everyday words what changed for
+   someone using the project ("Stop gstack from hitting GitHub's rate limit while it waits on PRs (GST-1713)")
+   and names what the user gets, not the mechanism; no `<type>(<scope>):` prefix, no tracker code, lane or Captain name, and none of the repository's
+   coined terms before that trailing group (docs/ship-policy.md#plain-titles).
 3. Every created or updated title MUST start with `v$NEW_VERSION `; check the file with
    `grep -Eq '^v<new-version>( |$)' "$TITLE_FILE"` and never publish an unprefixed title.
 4. **NO_VERSION:** replaces items 1-3: keep an existing title (the platform title
-   piped straight into the file), or write `<type>: <summary>`; no version prefix.
+   piped straight into the file), or write `<plain change>[ (<issue code>)]`; no version prefix.
+5. **Plain title:** run `~/.claude/skills/gstack/bin/gstack-plain-title check --title-file "$TITLE_FILE"`. On
+   `refused=<n>`, rewrite the file's front in everyday words (each `PLAIN_TITLE:` line names the word) and
+   rerun until `ok`, `exempt` or `none`; an existing PR's title is rewritten the same way. Then
+   `gstack-plain-title check --branch "$(git branch --show-current)" --mode warn` and print its last line;
+   a pushed branch is never renamed.
 
 Save the title file name for Step 19.
 
@@ -68,12 +76,18 @@ The completion message lists unpromoted candidates, `Related:` lines and any `IS
 ### Capy
 
 Run `[ "${GSTACK_CAPY:-}" = 1 ] && echo 'CAPY_PR: on' || echo 'CAPY_PR: off'`. On `CAPY_PR: on`, read
-`~/.claude/skills/gstack/ship/sections/capy-pr.md` now: the body opens with its `## What changed`,
-`## Why` and `## Approvals` before the sections below. On `CAPY_PR: off`, skip it.
+`~/.claude/skills/gstack/ship/sections/capy-pr.md` now: `## What changed`, `## Why` and `## Blast radius`
+lead; `## Approvals` goes into the Agent notes. On `CAPY_PR: off`, skip it.
 
-The PR/MR body should contain these sections (never reuse a prior run's body):
+The PR/MR body should contain these sections (never reuse a prior run's body). The front is for people,
+the end is for machines: the body opens with one or two plain sentences (what changed for someone using
+the project, and which goal from the project's README it serves; with no stated goals, the user-visible
+benefit), with no heading above them. Tracker codes, receipts, approval and Plan lines, review-loop and
+gate lines and every other machine-read line go only in the closing Agent notes section, never above it.
 
 ```
+<One or two plain sentences: what changed for a user, and the README goal it serves.>
+
 ## Summary
 <Open with the problem in the user's words (what they hit, saw or asked), then the fix
 and what they get now; themes from `git log origin/<base>..HEAD --oneline` after that,
@@ -85,8 +99,7 @@ before the commit and names each line to rewrite.">
 ## Blast radius
 <One or two sentences: what else the change touches (callers, consumers, generated
 files, hosts) and the one fact that makes that safe, with the rung of the evidence
-ladder the fact reached (file:line read, walked failure path, script ran, repro). The
-ladder is the `/investigate` skill's Blast radius section, when present.>
+ladder the fact reached (file:line read, walked failure path, script ran, repro).>
 
 ## Test Coverage
 <coverage diagram from Step 7, or "All new code paths have test coverage.">
@@ -102,6 +115,8 @@ ZERO-RUN lane never reaches this body unresolved.>
 
 ## Pre-Landing Review
 <findings from Step 9 code review, or "No issues found."; then Step 9.4's `REVIEW_LOOP:` line.>
+<Each `Ruled note: …` line `gstack-approvals rulings` prints, verbatim: a finding the owner ruled a disclosed note,
+with its ruler and reason; finish's `MECHANICAL: x` as `Mechanical retake: x` and its `UID_SIDECAR: x (beside y)` as `Godot UID sidecar: x (beside y)`. `gstack-ship-receipt write --body` refuses a body missing one.>
 <Gate edits: Step 9's latest `Gate edits:` line verbatim — `none detected (...)`,
 `N listed, M read, K findings — J kept, R restored, O open`, `partial (...)` or
 `UNAVAILABLE — ...`; never `none detected` for partial or UNAVAILABLE. Under it, each
@@ -118,7 +133,7 @@ proof, fixes and blocked/inconclusive/not-run coverage. Never present stale or
 unavailable results as passing.>
 
 ## Design Review
-<If design review ran: "Design Review (lite): N findings — M auto-fixed, K skipped. AI Slop: clean/N issues.">
+<If design review ran: "Design Review: static (no preview declared). Design-lite: N findings — M auto-fixed, K skipped. AI Slop: clean/N issues." The receipt's `design` field says the same; no rendered /design-review runs inside /ship yet.>
 <Detector: "clean" | "N findings (rule-id, rule-id)" | "not installed" | "not cached" | "off" — the state the probe printed; rule ids and counts only, finding text and snippets never reach the PR body.>
 <If no frontend files changed: "No frontend files changed — design review skipped.">
 
@@ -174,6 +189,15 @@ the receipt write below refuses (`DOCS_AUDIT_BLOCKED`) when the body lacks it.>
 - [x] <Each executed test lane's command>: <observed passing summary>
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+<!-- gstack:agent-notes -->
+<details><summary>Agent notes</summary>
+
+<Machine-read lines, last: `Refs <issue codes>`, the `## Approvals` output (Capy) with its Plan line,
+and the Pre-Landing Review section's `REVIEW_LOOP:`, `Gate edits:`, `Ruled note:`, `Review-loop exception:`
+and exception lines. `gstack-ship-receipt write` adds the receipt here; never type it.>
+
+</details>
 ```
 
 #### Compose the body, then publish through gstack-post
@@ -186,7 +210,7 @@ WARN-degrades the example credentials those tools quote instead of blocking the 
 (a live-format credential inside the fence still blocks).
 
 Write the body from above into two private files: the first through the
-`## Documentation` heading line, the second from `## Test plan` on.
+`## Documentation` heading line, the second from `## Test plan` on, ending with the Agent notes section.
 
 ```bash
 _GT="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp"
@@ -209,6 +233,7 @@ BODY_TOP_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<
 BODY_REST_FILE="$(git rev-parse --show-toplevel 2>/dev/null || pwd)/.gstack/tmp/<body-rest-file-name>"
 [ -s "$BODY_TOP_FILE" ] && [ -s "$BODY_REST_FILE" ] || { echo "Not composed: $BODY_TOP_FILE or $BODY_REST_FILE is empty, so the body was never written. Write both, then rerun." >&2; exit 1; }
 ~/.claude/skills/gstack/bin/gstack-prose-lint "$BODY_TOP_FILE" --sections 'Why,Summary,Blast radius' --gate >&2 || { echo "Not composed: fix what gstack-prose-lint printed above (a PROSE: line is a sentence to rewrite in the draft; a usage line means the draft lost a heading), then rerun." >&2; exit 1; }
+~/.claude/skills/gstack/bin/gstack-plain-title check --body-file "$BODY_TOP_FILE" >&2 || { echo "Not composed: rewrite the opening the PLAIN_TITLE: lines above name (one or two plain sentences, no heading or code above them), then rerun." >&2; exit 1; }
 { awk 1 "$BODY_TOP_FILE" && cat -- "$DOCS_SECTION_FILE" && echo && awk 1 "$BODY_REST_FILE"; } > "$PR_BODY_FILE" || exit 1
 rm -f "$BODY_TOP_FILE" "$BODY_REST_FILE"
 echo "PR_BODY_FILE: $PR_BODY_FILE"
@@ -225,6 +250,9 @@ NS=$(~/.claude/skills/gstack/bin/gstack-no-stop list | sed -n 's/^NO_STOP_FILE: 
 ~/.claude/skills/gstack/bin/gstack-ship-receipt write --pr <pr-number> --base <base> --gate @.gstack/tmp/ship-gate.json --pregate .gstack/tmp/pregate.json --issues @.gstack/tmp/issues.json --review-loop @.gstack/tmp/review-loop.json --docs @.gstack/tmp/docs-audit.json $([ -s .gstack/tmp/targeted.json ] && echo --review-targeted @.gstack/tmp/targeted.json) ${NS:+--no-stop "@$NS"} --body "$PR_BODY_FILE"
 ```
 
+If write refuses `review_targeted` for a docs claim added after the read, or after a granted fix round (add its `--grant`), rerun Step 9's plan with `--range-base <its head>
+--targeted-ran <its targeted_patch_id>`; on `NEXT: targeted`, run that one reader (`pass`, its voices stage,
+`verify --targeted-out .gstack/tmp/targeted.json`) and write again.
 A Step 5 red-base pause adds `--base-red <pause file>` (a conditional receipt the queue
 refuses, `QUEUE_RECEIPT_CONDITIONAL`). `--docs` reads the record Step 14.5 saved (`{status, scope[, exception]}`): the
 receipt carries it as `docs`, and a `blocked` status without the owner's exception,
@@ -232,8 +260,13 @@ or a body missing the exception line, is `DOCS_AUDIT_BLOCKED` with nothing writt
 When the owner accepted a stop after a fix-check edit, add
 `--review-loop-exception @<file>` (`{accepted_by, date, via, reason, fix_check: {head, findings}}`)
 and put its printed `Review-loop exception:` line in the body; never a prose line under `REVIEW_LOOP:`.
-When `gstack-review-dispatch verify` printed `REVIEW_EXCLUDE_RECORD: digest=<d>`, add `--review-exclude <d>`;
-a digest that no longer matches HEAD is `RECEIPT_INVALID field=review_exclude`: rerun the review, not the write.
+A finding the owner rules a disclosed note instead of a fix is closed only by the owner's
+`gstack-approvals rule`, recorded outside this run, never by this run or a review-log field
+(docs/ship-policy.md#ruled-notes); the receipt lists each one as `ruled_notes`.
+When `gstack-review-dispatch verify` printed `REVIEW_EXCLUDE_RECORD: digest=<d>`, add `--review-exclude <d>`
+and the last Step 14.5 audit's `--docs-post <audit-id>-post.json` and `--docs-pre <its Prepare snapshot>`; a digest that no longer matches HEAD is
+`RECEIPT_INVALID field=review_exclude`: rerun the review, not the write, unless only the docs audit's
+files under `review_exclude_paths` changed it, which `--docs-post` binds (`REVIEW_EXCLUDE_DOCS_AUDIT:`).
 
 The summary reads this branch's review log for the invocation's passes (its
 `REVIEW_LOOP:` line is the one the Pre-Landing Review section carries). Here every
@@ -292,6 +325,8 @@ With open gate findings the same command carries `--draft` before `--title-file`
 
 Branch on the exit code of either block:
 - **0** posted. Remove `$PR_BODY_FILE` and the title file.
+- **4** `PLAIN_TITLE_REFUSED`: nothing was posted, body included. Rewrite the title file's front the way
+  each `PLAIN_TITLE:` line says (Step 18 item 5) and rerun the same block.
 - **1** HIGH finding: BLOCKED — do not publish. Rotate and redact at the source, then
   compose fresh files.
 - **2** MEDIUM findings, printed as `RULE:` lines with a `TOKEN:`. AskUserQuestion per

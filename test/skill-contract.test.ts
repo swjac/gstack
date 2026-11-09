@@ -12,6 +12,7 @@ import {
   type CheckResult,
   type Contract,
 } from '../lib/skill-contract';
+import { lastBashWrite } from '../lib/shell-writes';
 import { readFrontmatter } from '../lib/skill-route';
 import {
   CONTRACT_HOOK, DEBUG_REPORT, INTERACTIVE_TURNS, J1_TRANSCRIPT, ROOT, SKILLS, hookEnv, meta, result, runHook, say, skillsDir, slash, tmpDir, tool, user,
@@ -24,11 +25,11 @@ const contractOf = (name: string): Contract => {
   if (!parsed || !('contract' in parsed)) throw new Error(`fixture ${name} has no valid contract`);
   return parsed.contract;
 };
-const check = (lines: string[], skill = 'investigate') => checkContract(parseTranscript(lines.join('\n')), skill, contractOf(skill));
+const check = (lines: string[], skill = 'verify') => checkContract(parseTranscript(lines.join('\n')), skill, contractOf(skill));
 
 describe('schema v1', () => {
   test('block and flow style parse to the same items', () => {
-    expect(contractOf('investigate').items.map(i => [i.id, i.kind])).toEqual([['debug-report', 'report_labels'], ['repro-after-fix', 'check_after_last_edit']]);
+    expect(contractOf('verify').items.map(i => [i.id, i.kind])).toEqual([['debug-report', 'report_labels'], ['repro-after-fix', 'check_after_last_edit']]);
     expect(contractOf('review').items.map(i => i.kind)).toEqual(['selected_specialists_dispatched', 'agent_dispatch', 'report_labels']);
   });
 
@@ -56,11 +57,11 @@ describe('transcript parsing', () => {
   test('skill loads: Skill tool, typed /command, Read of a SKILL.md; sidechain records ignored', () => {
     const t = parseTranscript([
       tool('s', 'Skill', { skill: 'gstack:review' }),
-      slash('investigate'),
+      slash('verify'),
       tool('r', 'Read', { file_path: '/home/u/.claude/skills/qa/SKILL.md' }),
       JSON.stringify({ type: 'assistant', isSidechain: true, message: { content: [{ type: 'tool_use', id: 'x', name: 'Skill', input: { skill: 'ship' } }] } }),
     ].join('\n'));
-    expect(skillLoads(t).map(l => [l.skill, l.via])).toEqual([['review', 'skill-tool'], ['investigate', 'slash-command'], ['qa', 'read']]);
+    expect(skillLoads(t).map(l => [l.skill, l.via])).toEqual([['review', 'skill-tool'], ['verify', 'slash-command'], ['qa', 'read']]);
   });
 
   test('an unknown shape throws; a partial last line does not', () => {
@@ -96,7 +97,7 @@ describe('checkContract is a pure function of the transcript', () => {
     expect(runAfter('cat src/auth.ts')).toBe('missing');
     const before = check([...J1_TRANSCRIPT.slice(0, 4), tool('b', 'Bash', { command: 'bun test' }), ...J1_TRANSCRIPT.slice(4)]);
     expect(before.items[1].status).toBe('missing');
-    expect(check([slash('investigate'), say('No code change was needed.')]).items[1]).toMatchObject({ status: 'met', detail: 'no edits since the skill loaded' });
+    expect(check([slash('verify'), say('No code change was needed.')]).items[1]).toMatchObject({ status: 'met', detail: 'no edits since the skill loaded' });
   });
 
   test('selected_specialists_dispatched (lane B marker), agent_dispatch and the /review report', () => {
@@ -162,7 +163,7 @@ describe('checkContract is a pure function of the transcript', () => {
     expect(STATUS_RE.test('The status is DONE')).toBe(false);
     expect(check(INTERACTIVE_TURNS[0]).pendingQuestion).toBe(true);
     expect(check(INTERACTIVE_TURNS.flat()).statusLine).toBe('DONE');
-    expect(check([slash('investigate'), tool('q', 'AskUserQuestion', { questions: [] })]).pendingQuestion).toBe(true);
+    expect(check([slash('verify'), tool('q', 'AskUserQuestion', { questions: [] })]).pendingQuestion).toBe(true);
     const notified = [slash('review'), tool('a', 'Agent', { description: 'Testing', run_in_background: true }), result('a', 'launched'),
       meta('<task-notification>agent a completed</task-notification>')];
     expect(check(notified, 'review').pendingAgents).toEqual([]);
@@ -170,27 +171,27 @@ describe('checkContract is a pure function of the transcript', () => {
   });
 
   test('items are checked from the skill\'s LAST load: an earlier run\'s report does not satisfy a new one', () => {
-    const r = check([...INTERACTIVE_TURNS.flat(), user('another bug'), tool('s', 'Skill', { skill: 'investigate' }), tool('e', 'Edit', { file_path: 'x' })]);
+    const r = check([...INTERACTIVE_TURNS.flat(), user('another bug'), tool('s', 'Skill', { skill: 'verify' }), tool('e', 'Edit', { file_path: 'x' })]);
     expect(r.missing).toEqual(['debug-report', 'repro-after-fix']);
   });
 
-  test('an early exit counts as met: /review "Nothing to review" or STATUS: BLOCKED, /investigate Status: BLOCKED in its DEBUG REPORT', () => {
+  test('an early exit counts as met: /review "Nothing to review" or STATUS: BLOCKED, /verify Status: BLOCKED in its DEBUG REPORT', () => {
     const early = (lines: string[], skill: string) => check(lines, skill);
     const nothing = early([slash('review'), say('Nothing to review — no changes against the base branch.')], 'review');
     expect(nothing).toMatchObject({ met: true, follow: true, missing: [] });
     expect(nothing.items[0].detail).toBe('the skill ended the run early (Nothing to review)');
     expect(early([slash('review'), say('Base branch could not be found.\nSTATUS: BLOCKED')], 'review').met).toBe(true);
     const blockedReport = DEBUG_REPORT.replace('Status:          DONE', 'Status:          BLOCKED');
-    expect(early([...J1_TRANSCRIPT.slice(0, -1), say(blockedReport)], 'investigate')).toMatchObject({ met: true, statusLine: 'BLOCKED' });
-    expect(early([...J1_TRANSCRIPT.slice(0, -1), say(DEBUG_REPORT)], 'investigate').missing).toEqual(['repro-after-fix']);
+    expect(early([...J1_TRANSCRIPT.slice(0, -1), say(blockedReport)], 'verify')).toMatchObject({ met: true, statusLine: 'BLOCKED' });
+    expect(early([...J1_TRANSCRIPT.slice(0, -1), say(DEBUG_REPORT)], 'verify').missing).toEqual(['repro-after-fix']);
     expect(early([slash('review'), say('I would print STATUS: BLOCKED if the base were missing, but it is here. Done.')], 'review').met).toBe(false);
     expect(early([slash('review'), say('Nothing to review under docs/; checking lib/ next.'), say('Done.')], 'review').met).toBe(false);
-    expect(early([...J1_TRANSCRIPT.slice(0, -1), say('There is nothing to review in the docs folder. Fixed it.')], 'investigate').met).toBe(false);
+    expect(early([...J1_TRANSCRIPT.slice(0, -1), say('There is nothing to review in the docs folder. Fixed it.')], 'verify').met).toBe(false);
   });
 
   test('a Read of a SKILL.md counts as a load only under a skills/ directory, not in a gstack checkout', () => {
     const loads = (file_path: string) => skillLoads(parseTranscript(tool('r', 'Read', { file_path }))).map(l => l.skill);
-    expect(loads('/home/u/.claude/skills/gstack/investigate/SKILL.md')).toEqual(['investigate']);
+    expect(loads('/home/u/.claude/skills/gstack/verify/SKILL.md')).toEqual(['verify']);
     expect(loads('C:\\Users\\u\\.claude\\skills\\review\\SKILL.md')).toEqual(['review']);
     expect(loads('/home/u/src/gstack/review/SKILL.md')).toEqual([]);
   });
@@ -204,6 +205,73 @@ describe('checkContract is a pure function of the transcript', () => {
     for (const cmd of ['git commit -m wip --no-verify', 'git add test/a.test.ts', 'cat test/a.test.ts', 'git diff --check', 'ls go', 'test -f README.md', './scripts/fetch-latest.sh', 'bash scripts/deploy.sh',
       'bun install', 'npm install lodash', 'bun add zod', 'go build ./...', 'go mod tidy', 'node --version', 'make clean', 'make', 'npm run build', 'curl --version'])
       expect([cmd, isCheckCommand(cmd)]).toEqual([cmd, false]);
+  });
+
+  test('check_after_last_edit: a Bash write to a repo file is an edit, so a fix written through the shell needs a check after it (GST-1633)', () => {
+    const loaded = J1_TRANSCRIPT.slice(0, 4);
+    const bash = (id: string, command: string) => [tool(id, 'Bash', { command }), result(id, 'ok')];
+    const after = (...commands: string[]) => check([...loaded, ...bash('t0', 'bun test'), ...commands.flatMap((c, i) => bash(`b${i}`, c))]).items[1];
+    const writes = [
+      "python3 - <<'EOF'\np = 'src/auth.ts'\ns = open(p).read()\nopen(p, 'w').write(s.replace('a', 'b'))\nEOF",
+      "sed -i 's/session.user/session?.user/' src/auth.ts",
+      "echo 'export const x = 1' | tee src/auth.ts",
+      "printf 'fixed\\n' >> src/auth.ts",
+      "cat > src/auth.ts <<'EOF'\nexport function login() {}\nEOF",
+      "git apply <<'EOF'\n--- a/src/auth.ts\n+++ b/src/auth.ts\n@@ -1 +1 @@\n-a\n+b\nEOF",
+      'patch -p1 < fix.diff',
+      "cd src && perl -pi -e 's/a/b/' auth.ts",
+      'python3 -c "from pathlib import Path; Path(\'src/auth.ts\').write_text(\'x\')"',
+      'node -e "require(\'fs\').writeFileSync(\'/repo/src/auth.ts\', \'x\')"',
+      "cat > /tmp/fix.py <<'EOF'\nwith open('src/auth.ts', 'w') as f:\n    f.write('x')\nEOF\npython3 /tmp/fix.py",
+      'grep -rl session.user src | xargs sed -i s/session.user/session?.user/',
+    ];
+    for (const w of writes) {
+      expect([w, after(w).status]).toEqual([w, 'missing']);
+      expect([w, after(w, 'bun test test/auth.test.ts').status]).toEqual([w, 'met']);
+      expect([w, after(`${w}\nbun test`).status]).toEqual([w, 'met']);
+      expect([w, after(`bun test\n${w}`).status]).toEqual([w, 'missing']);
+    }
+    expect(after(writes[1]).detail).toBe('no test or repro command after the last Bash write (src/auth.ts)');
+    expect(after(writes[0], 'git diff src/auth.ts').status).toBe('missing');
+  });
+
+  test('check_after_last_edit: reads, stdout, writes outside the repo and fd redirects are not edits (GST-1633)', () => {
+    const edited = [...J1_TRANSCRIPT.slice(0, -1), tool('t0', 'Bash', { command: 'bun test' }), result('t0', 'ok')];
+    const after = (command: string) => check([...edited, tool('b', 'Bash', { command }), result('b', 'ok')]).items[1].status;
+    const controls = [
+      'cat src/auth.ts', 'grep -n user src/auth.ts', 'sed -n 1,20p src/auth.ts', 'echo done', 'echo "a > src/auth.ts"', "grep '>' src/auth.ts",
+      "python3 - <<'EOF'\nprint(open('src/auth.ts').read())\nEOF", 'python3 -c "open(\'/tmp/x\', \'w\').write(\'y\')"',
+      'echo x > /tmp/out.txt', "cat > /tmp/fix.py <<'EOF'\nx = 1\nEOF", 'cd /tmp && echo x > notes.txt', 'echo x | tee /tmp/log', 'sed -i s/a/b/ /tmp/a.txt',
+      'echo x > ../elsewhere/a.txt', 'echo x > /home/u/notes.txt', 'echo x > ~/notes.txt', 'echo x > "$OUT"',
+      'bun test 2>&1 | tail -5', 'ls >/dev/null 2>&1', 'git status 2>&1', '[[ 2 > 1 ]] && echo ok', '(( 2 > 1 )) && echo ok',
+      'git apply --check fix.diff', 'patch --dry-run -p1 < fix.diff', "cat <<'EOF'\necho x > src/auth.ts\nEOF",
+    ];
+    for (const c of controls) expect([c, after(c)]).toEqual([c, 'met']);
+    expect(after('bun test > test-output.log')).toBe('met');
+    expect(after('bun test 2>&1 | tee test-output.log')).toBe('met');
+    const noCwd = (lines: string[]) => lines.map(l => { const o = JSON.parse(l); delete o.cwd; return JSON.stringify(o); });
+    const bare = (command: string) => check(noCwd([...edited, tool('b', 'Bash', { command }), result('b', 'ok')])).items[1].status;
+    expect(bare('sed -i s/a/b/ src/auth.ts')).toBe('missing');
+    expect(bare('echo x > /repo/src/auth.ts')).toBe('met');
+    expect(bare('cd /tmp && sed -i s/a/b/ a.txt')).toBe('met');
+  });
+
+  test('lastBashWrite: the files a Bash line writes and the commands that ran after the last one (GST-1633)', () => {
+    const w = (line: string, cwd = '/repo') => lastBashWrite(line, cwd, '/repo');
+    expect(w('bash -c "sed -i s/a/b/ src/a.py && bun test"')).toEqual({ files: ['src/a.py'], after: 'bun test' });
+    expect(w('(cd /tmp && echo x > a) && echo y > b.txt')).toEqual({ files: ['b.txt'], after: 'echo y >b.txt' });
+    expect(w("sed -i '' 's/a/b/' src/a.py")).toEqual({ files: ['src/a.py'], after: '' });
+    expect(w('echo x1>src/a.py')?.files).toEqual(['src/a.py']);
+    expect(w("cat <<A > x.txt; cat <<B > /tmp/y\na\nA\nb\nB\npytest")).toEqual({ files: ['x.txt'], after: 'cat >x.txt\ncat >/tmp/y\npytest' });
+    expect(w("python3 - <<'PY'\nimport pathlib\np = pathlib.Path('src/a.py')\np.write_text('x')\nPY")?.files).toEqual(['src/a.py']);
+    expect(w('git apply fix.diff')?.files).toEqual(['.']);
+    expect(w('git -C /tmp/other apply fix.diff')).toBeNull();
+    expect(w('sed -i s/a/b/ a.py', '/repo/src')?.files).toEqual(['src/a.py']);
+    expect(w("for f in src/*.py; do sed -i 's/a/b/' \"$f\"; done")).toBeNull();
+    expect(w("node -e \"fs.writeFileSync(path.join('src', 'a'), 'x')\"")).toBeNull();
+    for (const read of ['perl -Ilib t/basic.t', "perl -MList::Util=sum -le 'print sum(1, 2)'", 'sed -fscript.sed src/a.py', "sed -es/i/j/ src/a.py"]) expect([read, w(read)]).toEqual([read, null]);
+    expect(w("perl -Ilib -pi -e 's/a/b/' src/a.pm")?.files).toEqual(['src/a.pm']);
+    expect(w("perl -i.bak -pe 's/a/b/' src/a.pm")?.files).toEqual(['src/a.pm']);
   });
 
   test('check_after_last_edit: an option value is never the verb, and a long chain of wrapper words stays fast', () => {
@@ -248,12 +316,12 @@ describe('checkContract is a pure function of the transcript', () => {
   });
 
   test('loadLine checks one earlier run, bounded by the next load of the same skill', () => {
-    const lines = [...J1_TRANSCRIPT, tool('b', 'Bash', { command: 'bun test' }), result('b', 'ok'), say(DEBUG_REPORT), user('another bug'), tool('s2', 'Skill', { skill: 'investigate' }), tool('e9', 'Edit', { file_path: 'x' })];
+    const lines = [...J1_TRANSCRIPT, tool('b', 'Bash', { command: 'bun test' }), result('b', 'ok'), say(DEBUG_REPORT), user('another bug'), tool('s2', 'Skill', { skill: 'verify' }), tool('e9', 'Edit', { file_path: 'x' })];
     const t = parseTranscript(lines.join('\n'));
     const [first, second] = skillLoads(t);
-    expect(checkContract(t, 'investigate', contractOf('investigate'), { loadLine: first.line })).toMatchObject({ met: true, load: { line: first.line } });
-    expect(checkContract(t, 'investigate', contractOf('investigate'))).toMatchObject({ met: false, load: { line: second.line } });
-    expect(checkContract(t, 'investigate', contractOf('investigate'), { loadLine: 999 }).load).toBeNull();
+    expect(checkContract(t, 'verify', contractOf('verify'), { loadLine: first.line })).toMatchObject({ met: true, load: { line: first.line } });
+    expect(checkContract(t, 'verify', contractOf('verify'))).toMatchObject({ met: false, load: { line: second.line } });
+    expect(checkContract(t, 'verify', contractOf('verify'), { loadLine: 999 }).load).toBeNull();
   });
 });
 
@@ -268,19 +336,19 @@ describe('gstack-skill-contract CLI', () => {
   };
 
   test('check: exit 0 met, 1 unmet (with the block text), --json carries the items', () => {
-    const met = cli('check', '--transcript', write(INTERACTIVE_TURNS.flat()), '--skill', 'investigate');
+    const met = cli('check', '--transcript', write(INTERACTIVE_TURNS.flat()), '--skill', 'verify');
     expect(met.code).toBe(EXIT.MET);
-    expect(met.stdout).toStartWith('SKILL_CONTRACT_MET investigate (contract v1)');
-    const unmet = cli('check', '--transcript', write(J1_TRANSCRIPT), '--skill', 'investigate', '--json');
+    expect(met.stdout).toStartWith('SKILL_CONTRACT_MET verify (contract v1)');
+    const unmet = cli('check', '--transcript', write(J1_TRANSCRIPT), '--skill', 'verify', '--json');
     expect(unmet.code).toBe(EXIT.UNMET);
-    expect(JSON.parse(unmet.stdout)).toMatchObject({ exit: 1, skill: 'investigate', missing: ['debug-report', 'repro-after-fix'], follow: false });
+    expect(JSON.parse(unmet.stdout)).toMatchObject({ exit: 1, skill: 'verify', missing: ['debug-report', 'repro-after-fix'], follow: false });
   });
 
   test('check: stable error exits 2, 3, 4, 5, 6', () => {
-    expect(cli('check', '--skill', 'investigate').code).toBe(EXIT.USAGE);
-    expect(cli('check', '--transcript', path.join(work, 'none.jsonl'), '--skill', 'investigate')).toMatchObject({ code: EXIT.STATE_ERROR });
-    expect(cli('check', '--transcript', write(['{"x":1}']), '--skill', 'investigate').stderr).toStartWith('SKILL_CONTRACT_UNKNOWN_SHAPE');
-    expect(cli('check', '--transcript', write(['{"x":1}']), '--skill', 'investigate').code).toBe(EXIT.UNKNOWN_SHAPE);
+    expect(cli('check', '--skill', 'verify').code).toBe(EXIT.USAGE);
+    expect(cli('check', '--transcript', path.join(work, 'none.jsonl'), '--skill', 'verify')).toMatchObject({ code: EXIT.STATE_ERROR });
+    expect(cli('check', '--transcript', write(['{"x":1}']), '--skill', 'verify').stderr).toStartWith('SKILL_CONTRACT_UNKNOWN_SHAPE');
+    expect(cli('check', '--transcript', write(['{"x":1}']), '--skill', 'verify').code).toBe(EXIT.UNKNOWN_SHAPE);
     expect(cli('check', '--transcript', write(J1_TRANSCRIPT), '--skill', 'qa').code).toBe(EXIT.NO_CONTRACT);
     expect(cli('check', '--transcript', write(J1_TRANSCRIPT), '--skill', 'review').code).toBe(EXIT.NOT_LOADED);
     const file = path.join(work, 'SKILL.md');
@@ -289,12 +357,12 @@ describe('gstack-skill-contract CLI', () => {
   });
 
   test('waive is stateless: validates and acknowledges, writes nothing', () => {
-    const ok = cli('waive', 'repro-after-fix', '--reason', 'docs-only change', '--skill', 'investigate');
-    expect(ok).toEqual({ code: 0, stdout: 'SKILL_CONTRACT_WAIVED repro-after-fix (investigate): docs-only change (this session only; counted as a miss for follow)\n', stderr: '' });
+    const ok = cli('waive', 'repro-after-fix', '--reason', 'docs-only change', '--skill', 'verify');
+    expect(ok).toEqual({ code: 0, stdout: 'SKILL_CONTRACT_WAIVED repro-after-fix (verify): docs-only change (this session only; counted as a miss for follow)\n', stderr: '' });
     expect(fs.readdirSync(state)).toEqual([]);
     expect(cli('waive', 'repro-after-fix').code).toBe(EXIT.USAGE);
     expect(cli('waive', 'Not An Id', '--reason', 'x').code).toBe(EXIT.USAGE);
-    expect(cli('waive', 'nope', '--reason', 'x', '--skill', 'investigate').code).toBe(EXIT.USAGE);
+    expect(cli('waive', 'nope', '--reason', 'x', '--skill', 'verify').code).toBe(EXIT.USAGE);
   });
 
   test('report lists misses from the records, re-checking a blocked run that was fixed afterwards', () => {
@@ -309,7 +377,7 @@ describe('gstack-skill-contract CLI', () => {
     const rep = JSON.parse(r.stdout);
     expect(rep.runs).toBe(2);
     expect(rep.misses.map((m: any) => [m.session, m.outcome])).toEqual([['s-missed', 'miss']]);
-    expect(rep.items).toEqual([{ skill: 'investigate', item: 'debug-report', misses: 1 }, { skill: 'investigate', item: 'repro-after-fix', misses: 1 }]);
+    expect(rep.items).toEqual([{ skill: 'verify', item: 'debug-report', misses: 1 }, { skill: 'verify', item: 'repro-after-fix', misses: 1 }]);
     expect(cli('report').stdout).toStartWith('SKILL_CONTRACT_REPORT runs=2 misses=1');
   });
 
@@ -318,11 +386,11 @@ describe('gstack-skill-contract CLI', () => {
     const file = write(J1_TRANSCRIPT, 'again.jsonl');
     expect(JSON.parse(runHook(CONTRACT_HOOK, JSON.stringify({ session_id: 's-again', transcript_path: file, stop_hook_active: false }), env).stdout).decision).toBe('block');
     fs.appendFileSync(file, [tool('b', 'Bash', { command: 'bun test' }), result('b', 'ok'), say(DEBUG_REPORT),
-      user('one more bug'), tool('s2', 'Skill', { skill: 'investigate' }), say(DEBUG_REPORT)].join('\n') + '\n');
+      user('one more bug'), tool('s2', 'Skill', { skill: 'verify' }), say(DEBUG_REPORT)].join('\n') + '\n');
     expect(JSON.parse(cli('report', '--json').stdout).misses).toEqual([]);
   });
 
   test('installed contracts are read from SKILL.md frontmatter', () => {
-    expect(readFrontmatter(path.join(skills, 'investigate', 'SKILL.md'))).toContain('contract:');
+    expect(readFrontmatter(path.join(skills, 'verify', 'SKILL.md'))).toContain('contract:');
   });
 });

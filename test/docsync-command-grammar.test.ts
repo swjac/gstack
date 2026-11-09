@@ -234,6 +234,30 @@ test('the installed docs-candidate helper is admitted only with a private .json 
   expect(docsNativeInterface(fixture)).toContain('compare <that .json> and --help commands');
 });
 
+test('the docs-candidate result command is admitted only with a private output file, a plain audit id and a private --out-dir', () => {
+  const helper = path.join(fixture.skills, 'bin/gstack-docs-candidate');
+  const output = path.join(fixture.home, 'audit-1-output.md');
+  const dir = path.join(fixture.home, 'docs-record');
+  for (const command of [
+    `${helper} result ${output} --audit-id audit-1 --out-dir ${fixture.home}`,
+    `${helper} result ${output} --out-dir ${dir} --audit-id audit-1`,
+    `${helper} result --help`,
+  ]) expect(docsCommandAllowed(command, fixture), command).toBe(true);
+  for (const command of [
+    `${helper} result ${output} --audit-id audit-1 --out-dir ${fixture.repo}`,
+    `${helper} result ${output} --audit-id audit-1 --out-dir ${path.join(fixture.repo, '.gstack')}`,
+    `${helper} result ${output} --audit-id audit-1 --out-dir ${path.join(fixture.skills, 'bin')}`,
+    `${helper} result ${output} --audit-id audit-1 --out-dir ${dir} --exec rm`,
+    `${helper} result ${output} --audit-id audit-1 --mode edit`,
+    `${helper} result ${output} --audit-id audit-1 --audit-id audit-2`,
+    `${helper} result ${output} --audit-id audit-1`,
+    `${helper} result ${output} --audit-id ../audit-1 --out-dir ${dir}`,
+    `${helper} result ${path.join(fixture.repo, 'out.md')} --audit-id audit-1 --out-dir ${dir}`,
+    `${helper} result --help extra`,
+  ]) expect(docsCommandAllowed(command, fixture), command).toBe(false);
+  expect(docsNativeInterface(fixture)).toContain(`${fixture.skills.split(path.sep).join('/')}/bin/gstack-docs-candidate result <a saved private .md or .json child output> --audit-id <the audit id> --out-dir <`);
+});
+
 // Train gate 39904966815 and GSTA-63's focused run joined the candidate's --help onto a line of reads; v1.91.185.0 moved the
 // own-call rule into the sentence naming --help and the slip came back four times (JOINED_READ_LINES below). The --help only
 // prints usage, so it now joins a line of reads like a Git read; every other own-call command stays alone.
@@ -673,5 +697,54 @@ test.skipIf(process.platform === 'win32')('the captured lines joining a read com
       `git status; cat ${path.join(fixture.home, 'actor-state.json')} --help`, 'cd handbook; git status; cat README.md --help', 'git status; cat README.md --help; rm -rf handbook',
       'git status; cat README.md --help $(pwd)', 'git status; tee out.txt --help', 'git status; find . --help -delete'])
       expect(docsCommandAllowed(line, fixture, [publish]), line).toBe(false);
+  } finally { fixture.clean(); }
+});
+
+// Main backstop 41817566885 (b244e6d1, paid-slice-5-a1, ship-docsync-current, green on the in-run rerun): the parent ran
+// `mkdir -p <home>/ship2` as its own call, then snapshotted into it. The interface lets a private artifact live "in a new
+// directory you create there", and gstack-docs-candidate snapshot does not create the parent of its --out.
+test.skipIf(process.platform === 'win32')('the captured private-directory mkdir replays clean, and mkdir grants nothing else', () => {
+  const captured = JSON.parse(fs.readFileSync(path.join(import.meta.dir, 'fixtures/docsync-private-mkdir-public.json'), 'utf8')) as
+    { scenario: 'current'; calls: SkillTestResult['toolCalls'] };
+  const fixture = fixtureDocs(captured.scenario);
+  try {
+    const publish = path.join(fixture.home, 'fixture-publish.ts');
+    const fill = (text: string) => text.replaceAll('{home}', fixture.home).replaceAll('{shard}', path.dirname(path.dirname(fixture.home)));
+    const replayed = captured.calls.map(call => ({ ...call, input: Object.fromEntries(Object.entries(call.input).map(([key, value]) =>
+      [key, typeof value === 'string' ? fill(value) : value])), output: fill(call.output) }));
+    expect(replayed.filter(call => /^mkdir /.test(String(call.input?.command ?? ''))).map(call => call.input.command))
+      .toEqual([`mkdir -p ${fixture.home}/ship2`]);
+    expect(docsToolFailures({ toolCalls: replayed, exitReason: 'success' } as SkillTestResult, fixture, [publish], true)).toEqual([]);
+    for (const line of [`mkdir -p ${fixture.home}/ship2`, `mkdir ${fixture.home}/docs-audit`, `mkdir -p '${fixture.home}/audit-a1'`])
+      expect(docsCommandAllowed(line, fixture, [publish]), line).toBe(true);
+    const outside = fs.mkdtempSync(path.join(path.dirname(fixture.home), 'ds-mkdir-outside-'));
+    try {
+      fs.symlinkSync(outside, path.join(fixture.home, 'linked'));
+      for (const line of [`mkdir -p ${fixture.repo}/notes`, `mkdir -p ${fixture.repo}`, `mkdir -p ${fixture.home}/state`, `mkdir -p ${fixture.home}/state/x`,
+        `mkdir -p ${fixture.home}/.claude`, `mkdir -p ${fixture.skills}/x`, `mkdir -p ${fixture.env.CLAUDE_CONFIG_DIR}`, `mkdir -p ${fixture.home}/remote.git`,
+        `mkdir -p ${fixture.home}/a/b`, `mkdir -p ${fixture.home}/..`, `mkdir -p ${fixture.home}/x/..`, `mkdir -p ${fixture.home}`, `mkdir -p ${fixture.home}/linked`,
+        `mkdir -p ${outside}/x`, 'mkdir -p ship2', 'mkdir -p ~/ship2', 'mkdir -p $HOME/ship2', `mkdir -p ${fixture.home}/ship*`, `mkdir -m 777 ${fixture.home}/x`,
+        `mkdir -p ${fixture.home}/x ${fixture.home}/y`, `mkdir -p ${fixture.home}/x && git status`, `git status; mkdir -p ${fixture.home}/x`,
+        `mkdir -p ${fixture.home}/x; rm -rf ${fixture.repo}`, `mkdir -p ${fixture.home}/x > ${fixture.repo}/out.md`, `mkdir -pv ${fixture.home}/x`])
+        expect(docsCommandAllowed(line, fixture, [publish]), line).toBe(false);
+    } finally { fs.rmSync(outside, { recursive: true, force: true }); }
+  } finally { fixture.clean(); }
+});
+
+// Value: protects=the interface says how the private directory it offers is made, the form the observer admits; fails_when=the
+//   sentence stops naming the own-call mkdir; why_new=ship-docsync-store went red twice (#3997 screen 41850017482 slice 2, census
+//   41987975678 slice 4) on one read line each that carried a no-op mkdir stand-in; seam=none; no_claim=that the model now never
+//   probes, which only paid runs measure
+test('the interface names its one mkdir form, and both captured mkdir stand-ins stay refused', () => {
+  const fixture = fixtureDocs('store');
+  try {
+    const publish = path.join(fixture.home, 'fixture-publish.ts');
+    const sentence = docsNativeInterface(fixture, [publish]).split(/(?<=\.)\s+/).find(part => part.startsWith('A private JSON/Markdown artifact'));
+    expect(sentence).toContain(`(with one mkdir ${fixture.home}/<name>, optionally -p, as its own Bash call: the only mkdir this interface admits`);
+    expect(docsCommandAllowed(`mkdir ${fixture.home}/docs-store`, fixture, [publish])).toBe(true);
+    for (const line of [
+      `git rev-parse HEAD; git merge-base main HEAD; git rev-parse origin/main; mkdir -p /dev/null 2>/dev/null; ls ${fixture.home}/state`,
+      `git tag --list; git log --oneline --all; mkdir_check=1; ls ${fixture.home}`,
+    ]) expect(docsCommandAllowed(line, fixture, [publish]), line).toBe(false);
   } finally { fixture.clean(); }
 });

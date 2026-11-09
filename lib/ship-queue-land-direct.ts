@@ -8,29 +8,33 @@
  * moved past the pin's merge base, the checks at the pin never saw the tree that would land (GST-1316), so land builds
  * the pin merged onto the base tip and runs the base policy's land.merged_checks there (lib/land-merged-checks.ts;
  * repo commands, so only under --allow-repo-commands and never under --dry-run), refusing on a conflict or a failure;
- * with no list it prints a STALE_BASE: warn line and lands. Then gh pr merge --squash --match-head-commit <pin>, a check
+ * with no list it prints a STALE_BASE: warn line and lands. Then gh pr merge --squash --match-head-commit <pin> with the
+ * PR title as the commit subject (`--subject "<title> (#<n>)"`, so the checked title is main's history title), a check
  * that the merge commit's tree is the pin merged onto that commit's parent (its merged checks rerun when that parent is
  * neither the base land checked nor in the pin), a land note on refs/notes/gstack-trains, and the lock's release. A
  * rerun after GitHub merged goes straight to the tree check.
  */
+import { MIN_POLL_MS, pollDelayMs } from './gh-poll';
+import { mergedChecksFor } from './land-docs-only';
 import { runMergedChecks } from './land-merged-checks';
+import { landPlan } from './plan-record';
 import { classifyRelease, RELEASE_BRANCH } from './release-stamp';
 import { versionAtRef } from './restamp';
 import type { ShipPolicy } from './ship-policy';
 import { ciAtHead, loadBasePolicy, type QueueContext, type StepOutput } from './ship-queue';
-import { git, type QueueFailure } from './ship-queue-gate';
-import { acquireLandLock, lockLabel, ownsLock, readLock, type HeldLandLock, type LandLock } from './ship-queue-land-lock';
+import { git, type QueueFailure } from '../crew/lib/ship-queue-gate';
+import { acquireLandLock, lockLabel, ownsLock, readLock, type HeldLandLock, type LandLock } from '../crew/lib/ship-queue-land-lock';
 import * as os from 'node:os';
-import { activeFreeze, loadReady, persist, rebuildFromNotes, repoIdentity, type FreezeRecord } from './ship-queue-train-record';
+import { activeFreeze, loadReady, persist, rebuildFromNotes, repoIdentity, type FreezeRecord } from '../crew/lib/ship-queue-train-record';
 import { bindShippedReceipt } from './ship-receipt-depth';
 
-interface DirectPr { state: string; baseRefName?: string; headRefName: string; headRefOid: string; isCrossRepository: boolean; body: string; mergeable?: string; mergeStateStatus?: string; mergeCommit?: { oid: string } | null }
+interface DirectPr { state: string; baseRefName?: string; headRefName: string; headRefOid: string; isCrossRepository: boolean; body: string; title?: string; mergeable?: string; mergeStateStatus?: string; mergeCommit?: { oid: string } | null }
 export interface DirectOptions { pr: string; pin: string; dryRun?: boolean; allowRepoCommands?: boolean; breakLock?: boolean; repair?: boolean; now?: () => Date }
 
 const isSha = (s: string | undefined) => /^[0-9a-f]{40,64}$/.test(s ?? '');
 
 function view(ctx: QueueContext, pr: string): DirectPr | QueueFailure {
-  const r = ctx.gh(['pr', 'view', pr, '--json', 'state,baseRefName,headRefName,headRefOid,isCrossRepository,body,mergeable,mergeStateStatus,mergeCommit']);
+  const r = ctx.gh(['pr', 'view', pr, '--json', 'state,baseRefName,headRefName,headRefOid,isCrossRepository,body,title,mergeable,mergeStateStatus,mergeCommit']);
   try { return JSON.parse(r.out) as DirectPr; } catch { return { code: 'QUEUE_NOT_READY', message: `gh pr view ${pr} failed: ${(r.err ?? r.out).trim().slice(0, 160)}` }; }
 }
 
@@ -133,7 +137,7 @@ export function landDirect(ctx: QueueContext, o: DirectOptions): StepOutput {
   if (info.state === 'MERGED' && info.headRefOid === o.pin && isSha(info.mergeCommit?.oid)) {
     lines.push(`#${o.pr} is already merged as ${info.mergeCommit!.oid.slice(0, 12)}; checking the tree`);
     if (o.dryRun) return { ok: true, run, lines: [...lines, 'DRY-RUN: nothing verified (a rerun without --dry-run runs the tree check and writes the land note)'] };
-    const out = verifyMerge(ctx, root, o.pr, o.pin, info.mergeCommit!.oid, lines, run, now(), RELEASE_BRANCH.test(info.headRefName) ? 'pin-parent' : undefined, { checks: policy.land?.merged_checks ?? [], allow: o.allowRepoCommands });
+    const out = verifyMerge(ctx, root, o.pr, o.pin, info.mergeCommit!.oid, lines, run, now(), RELEASE_BRANCH.test(info.headRefName) ? 'pin-parent' : undefined, { checks: mergedChecksFor(root, policy.land, `origin/${ctx.base}`, o.pin), allow: o.allowRepoCommands });
     const left = readLock(root, remote);
     if (left.state !== 'held' || !ownsLock(left.lock, { pr: o.pr }, journal)) return out;
     const got = takeLock();
@@ -160,10 +164,16 @@ export function landDirect(ctx: QueueContext, o: DirectOptions): StepOutput {
     const receipt = bindShippedReceipt(root, `origin/${ctx.base}`, info.body ?? '', o.pr, [o.pin]);
     lines.push(receipt.line, ...(receipt.depthLine ? [receipt.depthLine] : []), ...(receipt.targetedLine ? [receipt.targetedLine] : []));
     if (!receipt.ok) return fail(lines, { code: receipt.code, message: receipt.message, fix: `run /ship at the pin, then gstack-ship-queue ready --pr ${o.pr}` });
-    if (!loadReady(keys, o.pr, o.pin)) return fail(lines, { code: 'QUEUE_NOT_READY', message: `no READY note for #${o.pr} at the pin ${o.pin.slice(0, 12)}`, fix: `the lane runs gstack-ship-queue ready --pr ${o.pr} --no-screen at the pin` });
+    const readyNote = loadReady(keys, o.pr, o.pin);
+    if (!readyNote) return fail(lines, { code: 'QUEUE_NOT_READY', message: `no READY note for #${o.pr} at the pin ${o.pin.slice(0, 12)}`, fix: `the lane runs gstack-ship-queue ready --pr ${o.pr} --no-screen at the pin` });
+    const plan = landPlan({ env: process.env, policyValue: policy.plan_record, record: readyNote.plan, body: info.body ?? '' });
+    if (plan.line) lines.push(plan.line);
+    if (plan.failure) return fail(lines, plan.failure);
   }
   const freeze = activeFreeze(keys);
-  if (freeze && !o.repair) return fail(lines, { code: 'QUEUE_TRAIN_FROZEN', message: `main is frozen by train ${freeze.train} (${freeze.reason})`, fix: 'only the one repair PR lands: gstack-ship-queue land --pr <repair-pr> --pin <sha> --repair; the freeze clears when the main backstop is green on a main that contains it (docs/ship-policy.md#direct-freeze)' });
+  const standsDown = freeze?.train === 'backstop' && policy.release_gate !== null;
+  if (standsDown) lines.push(`FREEZE: warn only: train backstop froze main (${freeze.reason}); the base policy declares release_gate, so the backstop stands down and a red release gate holds release-cut instead of land (docs/ship-policy.md#direct-freeze)`);
+  if (freeze && !standsDown && !o.repair) return fail(lines, { code: 'QUEUE_TRAIN_FROZEN', message: `main is frozen by train ${freeze.train} (${freeze.reason})`, fix: 'only the one repair PR lands: gstack-ship-queue land --pr <repair-pr> --pin <sha> --repair; the freeze clears when the main backstop is green on a main that contains it (docs/ship-policy.md#direct-freeze)' });
   const refused = !o.repair ? null : release ? { code: 'QUEUE_TRAIN_FROZEN' as const, message: `${info.headRefName} is a release PR, which never repairs main`, fix: 'land the revert or fix-forward with --repair; release once the backstop clears the freeze' } : repairRefusal(ctx, freeze, o.pr, o.pin);
   if (refused) return fail(lines, refused);
   const lock = o.dryRun ? readLock(root, remote) : null;
@@ -183,7 +193,7 @@ export function landDirect(ctx: QueueContext, o: DirectOptions): StepOutput {
   if (!ci.green) return fail(lines, { code: 'QUEUE_LAND_CHECKS', message: `checks are ${ci.line}`, fix: `wait for pending checks (gstack-pr-wait ${o.pr} --until green), or fix the red one at a new head; then rerun land` });
   const passed = new Set([...ci.checks.filter(c => c.conclusion === 'success').map(c => c.name), ...ci.contexts.filter(c => c.state === 'success').map(c => c.name)]);
   const missing = (policy.changelog_fragments?.required_checks ?? []).filter(n => !passed.has(n));
-  if (missing.length) return fail(lines, { code: 'QUEUE_LAND_CHECKS', message: `required check(s) ${missing.join(', ')} did not pass at the pin ${o.pin.slice(0, 12)}`, fix: `dispatch them on the branch (gh workflow run <workflow> --ref ${info.headRefName}) and rerun land once they pass` });
+  if (missing.length) return fail(lines, { code: 'QUEUE_LAND_CHECKS', message: `required check(s) ${missing.join(', ')} did not pass at the pin ${o.pin.slice(0, 12)}`, fix: `dispatch them on the branch (gh workflow run <workflow> --ref ${info.headRefName}) and rerun land once they pass; a check that runs on pull_request_target (such as Plain title) cannot be dispatched, so edit the PR title or body to rerun it` });
   if (info.mergeable !== 'MERGEABLE' || info.mergeStateStatus !== 'CLEAN') return fail(lines, { code: 'QUEUE_LAND_NOT_CLEAN', message: `GitHub reports #${o.pr} mergeable=${info.mergeable ?? 'unknown'} mergeStateStatus=${info.mergeStateStatus ?? 'unknown'}`, fix: info.mergeable === 'CONFLICTING' ? `the lane merges origin/${ctx.base} into the branch, resolves, runs /ship and ready at the new head` : 'UNKNOWN means GitHub is still computing: rerun land in a minute; BLOCKED or BEHIND names the branch rule to meet first' });
   let held: HeldLandLock | undefined;
   if (!o.dryRun) {
@@ -192,13 +202,14 @@ export function landDirect(ctx: QueueContext, o: DirectOptions): StepOutput {
     if ('failure' in got) return fail(lines, got.failure);
     held = got.held;
   }
+  const subject = info.title?.trim() ? ['--subject', `${info.title.trim()} (#${o.pr})`] : [];
   const locked = (): StepOutput => {
     if (held && !git(root, ['fetch', '-q', 'origin', ctx.base]).ok) return fail(lines, { code: 'QUEUE_NOT_READY', message: `cannot re-fetch origin/${ctx.base} under the land lock`, fix: 'fix the fetch, then rerun land' });
     const tip = git(root, ['rev-parse', `origin/${ctx.base}`]).out;
     const current = loadBasePolicy(ctx);
     if ('message' in current) return fail(lines, current);
     if (current.policy.merge !== 'direct') return fail(lines, { code: 'QUEUE_NOT_READY', message: `the base policy at ${tip.slice(0, 12)} no longer sets merge: direct`, fix: 'land through the train' });
-    const checks = current.policy.land?.merged_checks ?? [];
+    const checks = mergedChecksFor(root, current.policy.land, tip, o.pin);
     const staleRelease = releaseMoved(tip);
     if (staleRelease) return fail(lines, staleRelease);
     if (mergeBase !== tip) {
@@ -213,7 +224,7 @@ export function landDirect(ctx: QueueContext, o: DirectOptions): StepOutput {
         lines.push(`MERGED_CHECKS: pass tree=${mc.tree} base=${tip} pin=${o.pin.slice(0, 12)} checks: ${checks.join('; ')}`);
       }
     }
-    if (o.dryRun) return { ok: true, run, lines: [...lines, `DRY-RUN: nothing merged (would run gh pr merge ${o.pr} --squash --match-head-commit ${o.pin})`] };
+    if (o.dryRun) return { ok: true, run, lines: [...lines, `DRY-RUN: nothing merged (would run gh pr merge ${o.pr} ${policy.history === 'merge-only' ? '--merge' : '--squash'} --match-head-commit ${o.pin}${subject.length ? ` --subject ${JSON.stringify(subject[1])}` : ''})`] };
     if (o.repair) {
       if (!rebuildFromNotes(root, remote).fetched) return fail(lines, { code: 'QUEUE_NOT_READY', message: `cannot fetch refs/notes/gstack-trains under the land lock, so the freeze's repair slot cannot be read; nothing merged`, fix: 'fix the fetch, then rerun land' });
       const frozen = activeFreeze(keys);
@@ -231,10 +242,10 @@ export function landDirect(ctx: QueueContext, o: DirectOptions): StepOutput {
     const method = policy.history === 'merge-only' ? '--merge' : '--squash';
     const lost = held!.set('merging');
     if (lost) return fail(lines, lost);
-    const m = ctx.gh(['pr', 'merge', o.pr, method, '--match-head-commit', o.pin]);
+    const m = ctx.gh(['pr', 'merge', o.pr, method, '--match-head-commit', o.pin, ...subject]);
     let merge: string | undefined;
-    for (let i = 0; i < (m.ok ? 4 : 1) && !isSha(merge); i++) {
-      if (i) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 3_000);
+    for (let i = 0; i < (m.ok ? 3 : 1) && !isSha(merge); i++) {
+      if (i) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pollDelayMs(MIN_POLL_MS));
       const after = view(ctx, o.pr);
       merge = 'code' in after || after.state !== 'MERGED' ? undefined : after.mergeCommit?.oid;
     }

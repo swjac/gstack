@@ -23,8 +23,8 @@ version, CHANGELOG, commits), **Documentation** (Step 14.5) and **Next steps** (
 **Reviewers are the sections' own.** Every reviewer brief, its severity and confidence rules
 and gates come from its section verbatim; this file
 never shortens a reviewer's brief. A blocking reader's prompt is its `gstack-review-dispatch render`
-file, unchanged; its findings reach `merged.jsonl` only via `collect`; `judge` refuses a drop or downgrade. Audit readers (Steps 7, 8, 14.5) cannot block, so each runs at low effort on a small model,
-Step 14.5 once on Sonnet 5.5; findings go to the PR body.
+file, unchanged; its findings reach `merged.jsonl` only via `collect`; `judge` refuses a drop or downgrade. Audit readers (Steps 7, 8, 14.5) cannot block: low effort on `AUDIT_MODEL:`,
+14.5 once; findings go to the PR body.
 
 **Calls.** One pass with no fixes is 9 calls: Phases 1-8 and the report; at most 12 with a STOP's
 section read or fix-check, plus a keep-alive per 200 s waited.
@@ -107,7 +107,7 @@ One re-audit at most.
 ## 7. Release: Steps 15, 16, 17
 
 Commit in bisectable chunks; `gstack-ship-release finish --base <base> --reviewed-tree <t> --reviewed-base <b>
---docs-post <post> --lane ... [--build <cmd>] --trailer '<t>'`: `ROUTE:`, `DOCS:`, `EVIDENCE:` (FRESH;
+--docs-post <post> --lane ... [--build <cmd>] --trailer '<t>' [--plan <line>]`: `PLAN:`, `ROUTE:`, `DOCS:`, `EVIDENCE:` (FRESH;
 STALE or MISSING reruns once), `PREGATE:`; print them, the last `Gate edits:` and each `tests_ran`. Then
 `gstack-ship-release push --branch <branch> [--gate-open <n>]`: `REDACT_PREPUSH:`, `SEALED:`, `GUARDS:`, `PUSH:`
 (pushed, ALREADY_PUSHED). `EVIDENCE: DEFERRED`: the `accept` its `NEXT:` names; final-head
@@ -115,8 +115,8 @@ repo gates run beside CI. Unattended, push defers the pre-push offer; else its S
 
 ## 8. Publish: Steps 18, 19, 19-C, 20, 21, 22
 
-- Step 18: the open-PR lookup; a title file starting `v<NEW_VERSION> `. `UNATTENDED_SHIP:` with no open PR at HEAD takes Step 18-H.
-- Step 19 body: the receipt block, then the sections `sections/pr-body.md` lists (Pre-Landing Review: `REVIEW_LOOP:`, `Gate edits:`, deferred, notes), led under `CAPY_PR: on` (Step 19-C) by What changed, Why, Blast radius and Approvals (`gstack-approvals render`). `gstack-prose-lint <top> --sections 'Why,Summary,Blast radius' --gate`; `gstack-issue-links`; `gstack-review-scope summary --since "$REVIEW_SINCE" --run <dir> && gstack-ship-receipt write --pr <n> --base <base> --gate @<f> --pregate <f> --issues @<f> --review-loop @<f> --docs @<f> [--review-targeted @<f>] --body <body>`; `gstack-post pr-body` and `pr-title` (new PR: host PR tool; draft while a gate finding is `open`). `SHIP_RECEIPT:` opens your report.
+- Step 18: the open-PR lookup; a plain `v<NEW_VERSION> ` title (`gstack-plain-title check`). `UNATTENDED_SHIP:` with no open PR at HEAD takes Step 18-H.
+- Step 19 body: plain opening sentences, then sections `sections/pr-body.md` lists, led under `CAPY_PR: on` (Step 19-C) by What changed, Why and Blast radius; Agent notes last (receipt, `gstack-approvals render --plan`, `REVIEW_LOOP:`). `gstack-prose-lint <top> --sections 'Why,Summary,Blast radius' --gate`; `gstack-issue-links`; `gstack-review-scope summary --since "$REVIEW_SINCE" --run <dir> && gstack-ship-receipt write --pr <n> --base <base> --gate @<f> --pregate <f> --issues @<f> --review-loop @<f> --docs @<f> [--review-exclude <d>] [--review-targeted @<f>] --body <body>`; `gstack-post pr-body` and `pr-title` (new PR: host PR tool; draft while a gate finding is `open`). `SHIP_RECEIPT:` opens your report.
 - Step 20: a metrics row via `gstack-review-log`.
 - Step 22: `gstack-ship-budget close --reading R --credits C` (report `BUDGET_FINAL:`, `BUDGET_TIMELINE:` (tokens, credits), any `METER:` line), then `gstack-ship-receipt result --pr <n>`: `GSTACK_RESULT: skill=ship status=complete head=<sha> run=<dir>`. Under a merge queue, `gstack-ship-queue ready --pr <n> [--screen|--no-screen]` at the pushed head; paste its output.
 

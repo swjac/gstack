@@ -307,6 +307,25 @@ describe('gstack-capy-install', () => {
     expect(lastLine(run(f, [], { ...behind, STUB_DOCTOR_FAIL: '1' }).stdout)).toBe('gstack: fail codex');
   });
 
+  // Value: protects=the real installer renders GSTACK_CAPY_STALE as stale= right after behind=, and on its own (no fetch) with a network fix and no
+  // "; " inside the fix; fails_when=the note is dropped, misplaced, or breaks the trailer grammar; why_new=R75 (GST-1642) review F7; seam=env;
+  // no_claim=the session's computation (capy-skill-wrapper.test.ts)
+  test('trailer grammar: stale= follows behind=, or stands alone with a network fix when no fetch succeeded in 24 hours', () => {
+    const f = fixture();
+    const behind = { GSTACK_CAPY_BEHIND: '5', GSTACK_CAPY_BEHIND_TO: '1.2.8', GSTACK_CAPY_BEHIND_FIX: 'bash /s/install.sh --for autoplan', GSTACK_CAPY_STALE: '30h' };
+    expect(lastLine(run(f, [], behind).stdout)).toBe('gstack: ok 1.2.3 for=autoplan (behind=5 (latest: 1.2.8); stale=30h; fix: bash /s/install.sh --for autoplan)');
+    const nofetch = run(f, ['--for', 'autoplan'], { GSTACK_CAPY_STALE: 'no fetch from origin in 26h', GSTACK_CAPY_WRAPPER_PATH: '/s/install.sh' });
+    expect(lastLine(nofetch.stdout)).toBe('gstack: ok 1.2.3 for=autoplan (stale=no fetch from origin in 26h; fix: check network access to origin, then bash /s/install.sh --for autoplan)');
+  });
+
+  // Value: protects=the no-fetch fix note names a command even when the installer runs without the bootstrapper's GSTACK_CAPY_WRAPPER_PATH
+  // (GST-1658: it ended in "then" with nothing after it); fails_when=the fix is truncated; why_new=GST-1658; seam=env; no_claim=none
+  test('trailer grammar: the no-fetch fix note is complete without GSTACK_CAPY_WRAPPER_PATH', () => {
+    const f = fixture();
+    const bare = run(f, ['--for', 'autoplan'], { GSTACK_CAPY_STALE: 'no fetch from origin in 26h' });
+    expect(lastLine(bare.stdout)).toBe('gstack: ok 1.2.3 for=autoplan (stale=no fetch from origin in 26h; fix: check network access to origin, then bash <skill>/scripts/install.sh --for autoplan)');
+  });
+
   test('a skipped session-start upgrade above the minimum is a WARN, never a fail: the trailer stays ok with behind=, the skip reason and the fix, exit 0, and a WARN behind row names the code', () => {
     const f = fixture();
     const busy = { GSTACK_CAPY_BEHIND: '3', GSTACK_CAPY_BEHIND_TO: '1.2.6', GSTACK_CAPY_BEHIND_FIX: `${f.root}/bin/gstack-upgrade`, GSTACK_CAPY_BEHIND_BLOCKED: 'live gstack sessions hold this installation: pid 379 (124m dbus-daemon); fix: wait for those sessions to finish, or re-run with GSTACK_UPGRADE_FORCE=1 when you know they are idle (UPGRADE_BUSY)' };
@@ -336,6 +355,17 @@ describe('gstack-capy-install', () => {
     const behind = run(f, [], { STUB_DOCTOR_EXTRA: row, GSTACK_CAPY_BEHIND: '5', GSTACK_CAPY_BEHIND_TO: '1.2.9', GSTACK_CAPY_BEHIND_FIX: 'bash /s/install.sh --for autoplan' });
     expect(lastLine(behind.stdout)).toBe('gstack: ok 1.2.3 for=autoplan (behind=5 (latest: 1.2.9); floor=1.2.9 (/p/.gstack/ship-policy.json); fix: bash /s/install.sh --for autoplan)');
     expect(lastLine(run(f, [], { STUB_DOCTOR_EXTRA: row, STUB_DOCTOR_FAIL: '1' }).stdout)).toBe('gstack: fail codex');
+  });
+
+  // Value: protects=sessions from rerunning an install that cannot clear the floor (GST-1637); fails_when=the trailer offers the fast-forward when no release meets the floor; seam=bin/gstack-capy-install; no_claim=-
+  test('a WARN floor row saying no release meets the floor adds the floor note without a fix; behind keeps its own fix', () => {
+    const f = fixture();
+    const row = 'WARN floor — installed 1.2.3 is below the floor 1.2.9 that /p/.gstack/ship-policy.json declares (min_gstack_version), and no release meets this floor yet: the newest stable gstack is 1.2.5, so upgrading or rerunning the install cannot clear this row; fix: none here; the project lowers min_gstack_version to 1.2.5 or below (gstack-ship-policy validate refuses a floor above stable) (PROJECT_FLOOR_UNMET; d)';
+    const alone = run(f, ['--for', 'autoplan'], { STUB_DOCTOR_EXTRA: row, GSTACK_CAPY_WRAPPER_PATH: '/s/install.sh' });
+    expect(alone.status, alone.stdout + alone.stderr).toBe(0);
+    expect(lastLine(alone.stdout)).toBe('gstack: ok 1.2.3 for=autoplan (floor=1.2.9 (/p/.gstack/ship-policy.json; no release meets this floor yet))');
+    const behind = run(f, [], { STUB_DOCTOR_EXTRA: row, GSTACK_CAPY_BEHIND: '5', GSTACK_CAPY_BEHIND_TO: '1.2.9', GSTACK_CAPY_BEHIND_FIX: 'bash /s/install.sh --for autoplan' });
+    expect(lastLine(behind.stdout)).toBe('gstack: ok 1.2.3 for=autoplan (behind=5 (latest: 1.2.9); floor=1.2.9 (/p/.gstack/ship-policy.json; no release meets this floor yet); fix: bash /s/install.sh --for autoplan)');
   });
 
   test('--for none certifies nothing and installs nothing: ok not-needed, exit 0, no setup, no verdict, with or without a checkout', () => {
@@ -747,6 +777,22 @@ describe('gstack-capy-install: launch PATH, Bun reuse, CI pins, setup skip, verd
     // sourceable points at a verdict that now says fail.
     expect(failed.stdout).not.toMatch(/^GSTACK_LAUNCH_FILE:/m);
     expect(fs.existsSync(files[0].replace(/\.json$/, '.env'))).toBe(false);
+  });
+
+  // protects: on a Capy machine the launch file appends the checkout's crew/bin after bin, once, so
+  // the crew-only commands that moved there (gstack-release-gate, gstack-coauthor-trailers) still
+  // resolve by bare name; a checkout without crew/bin adds nothing. fails_when: CREW_BIN_DIR is
+  // dropped from the launch file, prepended ahead of PATH, or appended on every source.
+  test('the launch file appends crew/bin after bin once when the checkout has one', () => {
+    const f = fixture();
+    fs.mkdirSync(path.join(f.root, 'crew/bin'), { recursive: true });
+    const r = run(f, ['--for', 'autoplan']);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    const launchFile = r.stdout.match(/^GSTACK_LAUNCH_FILE: (.+)$/m)?.[1] ?? '';
+    const sourced = spawnSync('sh', ['-c', '. "$1" && . "$1" && printf "%s\\n" "$PATH"', '_', launchFile],
+      { encoding: 'utf8', timeout: 30_000, env: { PATH: '/usr/bin:/bin' } });
+    expect(sourced.status, sourced.stderr).toBe(0);
+    expect(sourced.stdout.trimEnd()).toBe(`/usr/bin:/bin:${f.root}/bin:${fs.realpathSync(path.join(f.root, 'crew/bin'))}`);
   });
 
   // /ship Step 7 value card. protects: the launch file is part of the ok verdict. When it cannot be
@@ -1340,6 +1386,25 @@ describe.skipIf(process.platform !== 'linux')('gstack-capy-install: the project 
     expect(onPath.status, onPath.stdout + onPath.stderr).toBe(0);
     expect(onPath.stdout).not.toContain('GSTACK_LAUNCH_PATH');
     expect(JSON.parse(fs.readFileSync(onPath.stdout.match(/GSTACK_INSTALL_VERDICT=(\S+)/)![1], 'utf8'))).toMatchObject({ node_path: path.join(f.stub, 'node'), node_rule: 'PATH', launch_path: '' });
+  });
+
+  test('the pins parser ignores the project\'s bunfig.toml: install and --check read the Bun and Node pins from the project directory without running its preload', () => {
+    const f = fixture();
+    withPins(f);
+    realBun(path.join(f.stub, 'bun'), '1.4.2');
+    fakeNode(path.join(f.stub, 'node'), '24.21.0');
+    const nvmNode = path.join(f.home, '.nvm/versions/node/v24.18.0/bin/node');
+    fakeNode(nvmNode, '24.18.0');
+    const project = nodeProject(f, '24.18.0');
+    const marker = path.join(f.base, 'preload-ran.log');
+    write(path.join(project, 'bunfig.toml'), 'preload = ["./preload.ts"]\n');
+    write(path.join(project, 'preload.ts'), `require('fs').appendFileSync(${JSON.stringify(marker)}, process.argv.slice(2).join(' ') + '\\n');\n`);
+    const r = run(f, ['--for', 'review'], {}, project);
+    expect(r.status, r.stdout + r.stderr).toBe(0);
+    expect(r.stdout).toContain(`node 24.18.0 at ${nvmNode} (nvm; satisfies the project's Node pins`);
+    const c = run(f, ['--check', '--for', 'review'], {}, project);
+    expect(c.status, c.stdout + c.stderr).toBe(0);
+    expect(fs.existsSync(marker) ? fs.readFileSync(marker, 'utf8') : '').toBe('');
   });
 
   test('no installed Node satisfies the pin: --check installs nothing; install downloads it into the runtime store checked against SHASUMS256.txt; a mismatch installs nothing', () => {

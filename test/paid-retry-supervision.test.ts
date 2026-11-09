@@ -21,18 +21,15 @@ const expectedWalls = {
   'test/skill-e2e-qa-callers.test.ts': 1_695_000,
   'test/skill-e2e-shared-libs-paths.test.ts': 1_920_000,
   'test/skill-e2e-ship-docsync.test.ts': 4_920_000,
-  'test/skill-llm-eval.test.ts': 3_170_000,
   'test/skill-e2e-auq-consistency.test.ts': 1_080_000,
-  'test/skill-e2e-auq-matrix.test.ts': 1_920_000,
-  'test/skill-e2e-plan-format.test.ts': 1_360_000,
+  'test/skill-e2e-auq-matrix.test.ts': 1_620_000,
+  'test/skill-e2e-plan-format.test.ts': 740_000,
   'test/skill-e2e-auto-decide-preserved.test.ts': 1_020_000,
   'test/skill-e2e-plan-ceo-finding-floor.test.ts': 1_020_000,
-  'test/skill-e2e-plan-eng-finding-floor.test.ts': 1_020_000,
   'test/skill-e2e-plan-design-finding-floor.test.ts': 1_020_000,
   'test/skill-e2e-plan-devex-finding-floor.test.ts': 1_020_000,
-  'test/skill-e2e-plan-mode-no-op.test.ts': 3_720_000,
+  'test/skill-e2e-plan-mode-no-op.test.ts': 2_520_000,
   'test/skill-e2e-plan-ceo-mode-routing.test.ts': 1_320_000,
-  'test/skill-e2e-plan-eng-plan-mode.test.ts': 1_320_000,
   'test/skill-e2e-plan-prosons.test.ts': 1_360_000,
   'test/skill-e2e-plan.test.ts': 3_120_000,
 };
@@ -51,9 +48,9 @@ test('paid evals never retry: every paid file and registered row runs once', () 
   }
 });
 
-test('registration covers exactly the seventeen demonstrated full-file retry gaps', () => {
+test('registration covers exactly the fourteen demonstrated full-file retry gaps', () => {
   expect(Object.fromEntries(newBudgets.map(row => [row.file, row.shardMs]))).toEqual(expectedWalls);
-  expect(new Set(FILE_RETRY_BUDGETS.map(row => row.file)).size).toBe(19);
+  expect(new Set(FILE_RETRY_BUDGETS.map(row => row.file)).size).toBe(16);
   expect(STRICT_RETRY_CASE_BUDGETS.map(row => row.file)).toEqual([
     ...FINDING_RETRY_BUDGETS.map(row => row.file), AUQ_CONSISTENCY_RETRY_BUDGET.file,
   ]);
@@ -83,20 +80,19 @@ test('source allowances retain all captures, cases, and finalization grace', () 
   expect(read('test/helpers/codex-eval.ts')).toContain('CODEX_EVAL_FINALIZE_MS = 2 * CODEX_DRAIN_GRACE_MS');
   expect(read('test/helpers/codex-session-runner.ts')).toMatch(/CODEX_DRAIN_GRACE_MS\s*=\s*5_000/);
   expect(read('test/helpers/office-hours-attempt.ts')).toContain('OFFICE_HOURS_BUN_GRACE_MS = 10_000');
-  for (const file of ['auto-decide-preserved', 'plan-ceo-finding-floor', 'plan-eng-finding-floor', 'plan-design-finding-floor', 'plan-devex-finding-floor']) {
+  for (const file of ['auto-decide-preserved', 'plan-ceo-finding-floor', 'plan-design-finding-floor', 'plan-devex-finding-floor']) {
     expect(timeoutExpressions(`test/skill-e2e-${file}.test.ts`)).toEqual(['PTY_MS']);
     if (file.endsWith('-finding-floor')) expect(read(`test/skill-e2e-${file}.test.ts`)).toContain('timeoutMs: CAPTURE_LONG_MS');
   }
   const noop = read('test/skill-e2e-plan-mode-no-op.test.ts');
-  expect(noop).toContain("['plan-ceo-review', 'plan-eng-review', 'plan-design-review', 'plan-devex-review'] as const");
-  expect(noop).toContain("['plan-eng-review', 'plan-design-review'] as const");
+  expect(noop).toContain("['plan-ceo-review', 'plan-design-review', 'plan-devex-review'] as const");
+  expect(noop).toContain("['plan-design-review'] as const");
   expect(timeoutExpressions('test/skill-e2e-plan-mode-no-op.test.ts')).toEqual(Array(2).fill('CAPTURE_LONG_MS'));
   expect(read('test/skill-e2e-plan-ceo-mode-routing.test.ts').match(/^\s*{ mode: '/gm)).toHaveLength(2);
   expect(timeoutExpressions('test/skill-e2e-plan-ceo-mode-routing.test.ts')).toEqual(['CAPTURE_LONG_MS']);
-  expect(timeoutExpressions('test/skill-e2e-plan-eng-plan-mode.test.ts')).toEqual(Array(2).fill('CAPTURE_LONG_MS'));
   expect(timeoutExpressions('test/skill-e2e-plan-prosons.test.ts')).toEqual(Array(4).fill('CAPTURE_MS + OFFICE_HOURS_BUN_GRACE_MS'));
-  expect(timeoutExpressions('test/skill-e2e-plan-format.test.ts')).toEqual(Array(4).fill('CAPTURE_MS + OFFICE_HOURS_BUN_GRACE_MS'));
-  expect(read('test/skill-e2e-auq-matrix.test.ts').match(/^    skill: '/gm)).toHaveLength(6);
+  expect(timeoutExpressions('test/skill-e2e-plan-format.test.ts')).toEqual(Array(2).fill('CAPTURE_MS + OFFICE_HOURS_BUN_GRACE_MS'));
+  expect(read('test/skill-e2e-auq-matrix.test.ts').match(/^    skill: '/gm)).toHaveLength(5);
   expect(timeoutExpressions('test/skill-e2e-auq-matrix.test.ts')).toEqual(['CAPTURE_MS']);
   expect(timeoutExpressions('test/skill-e2e-plan.test.ts')).toEqual([
     'PTY_MS', 'PTY_MS', 'CAPTURE_LONG_MS', 'CAPTURE_LONG_MS',
@@ -170,19 +166,8 @@ test('fixed AUQ count remains strict while mixed-tier files keep ordinary case h
   }
 });
 
-test('quality judge supervision includes the added judge without changing ordinary tiers or finding registrations', () => {
+test('supervision rows leave the ordinary tiers and finding registrations unchanged', () => {
   expect(ALL_TIERS).toEqual({ JUDGE_MS: 120000, CAPTURE_MS: 300000, CAPTURE_LONG_MS: 600000, PTY_MS: 900000, PTY_LONG_MS: 1200000 });
-  const quality = 'test/skill-llm-eval.test.ts';
-  const qualityBudget = FILE_RETRY_BUDGETS.find(row => row.file === quality)!;
-  expect(resolvePaidShardBudget([quality])).toEqual({ timeoutMs: 3_170_000, source: 'registered', policyId: qualityBudget.id });
-  expect(retriesForFiles([quality])).toBe(0);
-  const qualitySource = read(quality);
-  const judgeTimeouts = [...qualitySource.matchAll(/}\s*,\s*(JUDGE_MS|WORKFLOW_JUDGE_TEST_MS)\s*\);/g)].map(match => match[1]);
-  expect(judgeTimeouts.filter(timeout => timeout === 'JUDGE_MS')).toHaveLength(7);
-  expect(judgeTimeouts.filter(timeout => timeout === 'WORKFLOW_JUDGE_TEST_MS')).toHaveLength(17);
-  expect(qualitySource).toContain('WORKFLOW_JUDGE_TEST_MS = JUDGE_MS + 10_000');
-  expect(qualitySource).toContain('const workDeadline = started + JUDGE_MS');
-  expect(qualityBudget.shardMs).toBe(7 * ALL_TIERS.JUDGE_MS + 17 * (ALL_TIERS.JUDGE_MS + 10_000) + 120_000);
   expect(FINDING_RETRY_BUDGETS.map(row => [row.cases, row.testMs, row.shardMs])).toEqual([
     ...Array(2).fill([1, 1500000, 1620000]),
   ]);
@@ -244,7 +229,7 @@ test('both gate executors plan the complete census and supervise every planned s
     expect(execute[0].env.EVALS_CONCURRENCY).toBe('2');
     expect(executor.strategy['fail-fast']).toBe(false);
     if (jobName === 'gate-census') {
-      // One row per census arm and planned slice, each with its arm's planned slice ceiling (scripts/census-arms.ts).
+      // One row per census arm and planned slice, each with its arm's planned slice ceiling (crew/scripts/census-arms.ts).
       expect(executor.strategy.matrix.include).toBe('${{ fromJSON(needs.plan-slices.outputs.gate_matrix) }}');
       expect(executor['timeout-minutes']).toBe('${{ matrix.timeout }}');
     } else {
@@ -294,7 +279,6 @@ test('the periodic executor supervises every actual case within its planned CI w
     evalsAll: true, env: { EVALS_ALL: '1' } });
   const census = manifest.entries.filter(row => row.status === 'planned');
   expect(new Set(census.map(row => shardFile(row.file)))).toEqual(new Set(selectPaidTestFiles(collectPaidTestFiles(), 'periodic').selected));
-  expect(census.find(row => row.file === 'test/skill-llm-eval.test.ts')?.budget?.timeoutMs).toBe(3_170_000);
   // W2c/ENG-2: each slice's job ceiling covers its longest single shard (and the serialized overlay
     // envelope) plus setup; the in-process slice deadline turns work that cannot start into not_run.
     const sliceFiles = Array.from({ length: manifest.sliceCount }, (_, i) => sliceExecutionOrder(

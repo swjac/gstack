@@ -258,6 +258,10 @@ export function docsCommandAllowed(command: string, fixture: ReturnType<typeof f
   const insert = /^cat (['"]?)([^\s'"]+)\1 >> (['"]?)([^\s'"]+)\3$/.exec(text);
   if (insert) return [insert[2], insert[4]].every(file => path.isAbsolute(file) && /\.md$/i.test(file) &&
     !/[\x00-\x1f\x7f;&|<>`$\\()*?\[\]{}~#]/.test(file) && docsPrivateArtifact(file, fixture, scripts));
+  // The interface lets a private artifact live "in a new directory you create there" (under the home), and snapshot --out
+  // does not create its parent (gate 41817566885: the parent ran `mkdir -p <home>/ship2` before its snapshot).
+  const directory = /^mkdir (?:-p )?(['"]?)([^\s'"]+)\1$/.exec(text);
+  if (directory) return docsPrivateDirectory(directory[2]!, fixture);
   // Harmless wrappers are accepted on read-only commands only; lifecycle and
   // script calls must stay literal so their failures are not suppressed.
   const unwrapped = unwrapHarmlessRead(text, fixture);
@@ -410,13 +414,21 @@ function literalDocsCommandAllowed(text: string, fixture: ReturnType<typeof fixt
   if (commandName === candidate) {
     const privateJson = (file: string | undefined) => !!file && path.isAbsolute(file) && /\.json$/i.test(file) && docsPrivateArtifact(file, fixture, scripts);
     if (rest.length === 1 && rest[0] === '--help') return true;
-    if (rest.length === 2 && (rest[0] === 'snapshot' || rest[0] === 'compare') && rest[1] === '--help') return true;
+    if (rest.length === 2 && (rest[0] === 'snapshot' || rest[0] === 'compare' || rest[0] === 'result') && rest[1] === '--help') return true;
     if (rest[0] === 'compare') return rest.length === 2 && privateJson(rest[1]);
+    if (rest[0] === 'result') {
+      if (rest.length !== 6 || !path.isAbsolute(rest[1]) || !docsPrivateArtifact(rest[1], fixture, scripts)) return false;
+      const flags = [rest[2], rest[4]];
+      if (!flags.includes('--audit-id') || !flags.includes('--out-dir')) return false;
+      const auditId = rest[flags.indexOf('--audit-id') * 2 + 3];
+      const outDir = rest[flags.indexOf('--out-dir') * 2 + 3];
+      return /^[A-Za-z0-9._-]+$/.test(auditId) && !auditId.includes('..') && (outDir === fixture.home || docsPrivateDirectory(outDir, fixture));
+    }
     if (rest[0] !== 'snapshot' || rest.length % 2 !== 1) return false;
     const flags = rest.slice(1).filter((_, i) => i % 2 === 0);
-    const out = rest.slice(1).filter((_, i) => i % 2 === 1)[flags.indexOf('--out')];
-    return flags.every(flag => ['--out', '--audit-id', '--mode', '--base', '--select', '--docs'].includes(flag)) &&
-      flags.filter(flag => flag === '--out').length === 1 && privateJson(out);
+    const values = rest.slice(1).filter((_, i) => i % 2 === 1);
+    return flags.every(flag => ['--out', '--audit-id', '--mode', '--base', '--select', '--docs', '--run', '--pre', '--carry'].includes(flag)) &&
+      flags.filter(flag => flag === '--out').length === 1 && flags.every((flag, i) => !['--out', '--pre', '--carry'].includes(flag) || privateJson(values[i]));
   }
   const marker = 'GSTACK_SESSION_KIND=spawned';
   const start = path.join(fixture.skills, 'bin/gstack-skill-start').split(path.sep).join('/');
@@ -459,6 +471,15 @@ function docsPrivateArtifact(file: string, fixture: ReturnType<typeof fixtureDoc
     !protectedRoots.some(root => within(file, root) || within(actual, actualWritePath(root) ?? root)) &&
     !scripts.some(script => file === script || actual === actualWritePath(script)) &&
     path.basename(file) !== 'actor-state.json' && path.basename(actual) !== 'actor-state.json';
+}
+
+/** True when `dir` is one new directory directly under the fixture home, clear of the repository and every protected root. */
+function docsPrivateDirectory(dir: string, fixture: ReturnType<typeof fixtureDocs>): boolean {
+  if (!path.isAbsolute(dir) || path.normalize(dir) !== dir || path.dirname(dir) !== fixture.home ||
+      /[\x00-\x1f\x7f;&|<>`$\\()*?\[\]{}~#]/.test(dir)) return false;
+  const roots = [fixture.repo, fixture.skills, fixture.env.CLAUDE_CONFIG_DIR, fixture.env.GSTACK_HOME, path.join(fixture.home, 'remote.git')];
+  return actualWritePath(dir) === path.join(fs.realpathSync(fixture.home), path.basename(dir)) &&
+    !roots.some(root => within(dir, root) || within(root, dir));
 }
 
 /**

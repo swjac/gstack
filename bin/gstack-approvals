@@ -6,7 +6,11 @@
  *                        [--pending <text>] [--outcome approved|rejected|pending|standing]
  *                        [--date YYYY-MM-DD] [--source <ref>] [--branch <name>] [--json]
  *   gstack-approvals import --autoplan <run dir> [--by <whose words>] [--branch <name> | --stack <b1,b2,...>] [--json]
- *   gstack-approvals render [--no-heading] [--full] [--branch <name>]
+ *   gstack-approvals render [--no-heading] [--full | --redacted] [--branch <name>] [--plan <the brief's Plan line>]
+ *   gstack-approvals plan-check --plan <the brief's Plan line>
+ *   gstack-approvals rule --finding <fingerprint> --head <stop head> --reason <why> --words <exact words> --by <who ruled> [--json]
+ *   gstack-approvals rulings [--branch <name>]
+ *   gstack-approvals lane-exception --head <pushed head> --files <f1,f2> --reason <why> --words <exact words> --by <who granted> [--json]
  *   gstack-approvals list [--json] [--branch <name>]
  *   gstack-approvals sync [--branch <name>]
  *   gstack-approvals path [--branch <name>]
@@ -18,10 +22,14 @@
  * `render` prints the `## Approvals` section /ship puts in the PR body. Logic:
  * lib/approval-record.ts.
  */
+import { spawnSync } from 'node:child_process';
 import * as path from 'node:path';
 import { EXIT, exitTableHelp } from '../lib/headless-artifacts';
 import { appendRows, branchExists, buildRow, importAutoplan, locate, readRecord, renderMode, renderRecord, repoVisibility, syncRecord, type RecordError, type StoreLocation } from '../lib/approval-record';
+import { GSTACK_ACTOR, openShipRun, RULED_NOTE_SCOPE, ruledNoteRow, ruledNotes, ruledNoteText } from '../lib/ruled-notes';
 import { resultLine } from '../lib/result-codes';
+import { parsePlanLine, publicPlanLine, resolvePlan } from '../lib/plan-record';
+import { TEST_LANE_EXCEPTION_SCOPE, testLaneExceptionRow } from '../lib/test-lane-exception';
 
 const HELP = `gstack-approvals — the per-thread approval record (capy/skill/gstack/captain.md)
 
@@ -29,9 +37,27 @@ const HELP = `gstack-approvals — the per-thread approval record (capy/skill/gs
           [--pending <text>] [--outcome approved|rejected|pending|standing] [--date YYYY-MM-DD] [--source <ref>]
   import  --autoplan <run dir> [--by <whose words, e.g. Garry>] [--stack <b1,b2,...>]
           --stack writes the same rows to every branch of a stack; each branch is checked first, and one unknown branch writes none
-  render  [--no-heading] [--full] the ## Approvals section for a PR body or report; a public repository, or one whose
-          visibility gh cannot read, gets only "Approved: yes|no (record <id>)", because a PR description keeps
-          its edit history; --full prints the rows when gh cannot read the visibility and you know the repo is private
+  rule    --finding <fingerprint> --head <the stop head the owner ruled at> --reason <why it ships as a note, one line>
+          --words <the owner's exact words> --by <who ruled>
+          the owner's ruling that a review finding ships as a disclosed note (docs/ship-policy.md#ruled-notes); finish
+          counts that finding closed on a fix-check whose range_base..commit holds the head, and the receipt and PR body
+          list it; refused inside this checkout's open /ship run
+  rulings                         the "Ruled note: …" lines the Pre-Landing Review and the PR body carry
+  lane-exception --head <the pushed head the owner granted at> --files <the uncovered inventory files, comma-separated>
+          --reason <why, one line> --words <the owner's exact words> --by <who granted>
+          the owner's grant that a CI-carried lane counts although exactly those files are in no run's tree.json
+          (docs/ship-policy.md#test-lane-exceptions); gstack-evidence record-ci binds it only at that head, for that exact
+          set, after a local preflight of those files passes; refused inside this checkout's open /ship run
+  render  [--no-heading] [--full | --redacted] the ## Approvals section for a PR body or report; a public repository, or one
+          whose visibility gh cannot read, gets only "Approved: yes|no (record <id>)", because a PR description keeps
+          its edit history; --full prints the rows when gh cannot read the visibility and you know the repo is private;
+          --redacted prints the public form on any repository (a private repo that may go public); the two conflict;
+          the rows show each local path in Asked, Covers and Still pending as …/<file name> (list keeps the path);
+          --plan "<the brief's Plan line>" adds that line and its check, which gstack-ship-queue ready reads (lib/plan-record.ts);
+          redacted, an approval prints as "Plan: approved (record r-<id>)" with no run or row id, and one that does not
+          resolve refuses with no output
+  plan-check --plan "Plan: approved: <run id or row id> | approved (record r-<id>) | exempt: <reason> | required"
+          resolve a Plan line against every branch's approval record; PLAN: … and exit 0, or the refusal code and exit 3
   list    [--json]
   sync                            re-mirror the record (GSTACK_APPROVALS_DIR, the Captain's drive approvals/, or the project-user Drive)
   path                            print the record and mirror paths, and which rule chose the mirror
@@ -43,7 +69,7 @@ Example:
 
 ${exitTableHelp()}`;
 
-const VALUE_FLAGS = new Set(['--ask', '--words', '--by', '--scope', '--pending', '--outcome', '--date', '--source', '--branch', '--autoplan', '--stack']);
+const VALUE_FLAGS = new Set(['--ask', '--words', '--by', '--scope', '--pending', '--outcome', '--date', '--source', '--branch', '--autoplan', '--stack', '--finding', '--reason', '--head', '--files', '--plan']);
 
 function parse(args: string[]): { flags: Record<string, string>; bools: Set<string>; error?: string } {
   const flags: Record<string, string> = {};
@@ -54,7 +80,7 @@ function parse(args: string[]): { flags: Record<string, string>; bools: Set<stri
       const v = args[i + 1];
       if (v === undefined) return { flags, bools, error: `${a} needs a value` };
       flags[a] = v; i++;
-    } else if (a === '--json' || a === '--no-heading' || a === '--full') bools.add(a);
+    } else if (a === '--json' || a === '--no-heading' || a === '--full' || a === '--redacted') bools.add(a);
     else return { flags, bools, error: `unknown argument ${a}` };
   }
   return { flags, bools };
@@ -100,20 +126,57 @@ function importStack(cmd: string, flags: Record<string, string>, json: boolean):
   return firstError ? fail(cmd, firstError) : EXIT.ok;
 }
 
+const planText = (line: string) => (/^\s*Plan:/i.test(line) ? line.trim().replace(/^plan:/i, 'Plan:') : `Plan: ${line.trim()}`);
+
 function main(argv: string[]): number {
   const [cmd, ...rest] = argv;
   if (!cmd || cmd === '--help' || cmd === '-h') { process.stdout.write(HELP + '\n'); return cmd ? EXIT.ok : EXIT.usage; }
   const { flags, bools, error } = parse(rest);
   if (error) { process.stderr.write(`gstack-approvals: ${error}\n${HELP}\n`); return EXIT.usage; }
   if (flags['--stack'] !== undefined) return importStack(cmd, flags, bools.has('--json'));
+  if (cmd === 'plan-check') {
+    if (!flags['--plan']) { process.stderr.write(`gstack-approvals: plan-check needs --plan "<line>"\n`); return EXIT.usage; }
+    const res = resolvePlan(parsePlanLine(planText(flags['--plan'])), { cwd: process.cwd(), env: process.env });
+    if (!res.ok) return fail(cmd, res.failure);
+    process.stdout.write(`PLAN: ${res.summary}\n`);
+    return EXIT.ok;
+  }
   const loc = locate({ cwd: process.cwd(), env: process.env, branch: flags['--branch'] });
   if ('code' in loc) return fail(cmd, loc);
   const json = bools.has('--json');
   const recorded = (where: StoreLocation) => `${where.file}${where.mirror ? ` mirror=${where.mirror}` : ''}`;
 
-  if (cmd === 'add' || cmd === 'import') {
+  if (cmd === 'add' || cmd === 'import' || cmd === 'rule' || cmd === 'lane-exception') {
     let rows;
-    if (cmd === 'add') {
+    if (cmd === 'lane-exception') {
+      const invalid = (message: string) => fail(cmd, { code: 'APPROVAL_RECORD_INVALID', message });
+      const files = [...new Set((flags['--files'] ?? '').split(',').map(f => f.trim().replace(/^(\.\/)+/, '')).filter(Boolean))].sort();
+      const reason = (flags['--reason'] ?? '').trim();
+      if (!files.length || files.some(f => /\s/.test(f)) || !reason || /[\x00-\x1f\x7f]/.test(reason)) return invalid('lane-exception needs --files <the uncovered inventory files, comma-separated, no spaces> and --reason <why, one line>');
+      const head = spawnSync('git', ['rev-parse', '--verify', '--quiet', `${flags['--head'] ?? ''}^{commit}`], { encoding: 'utf8', timeout: 10_000 });
+      if (!flags['--head'] || head.status !== 0) return invalid('lane-exception needs --head <the pushed head the owner granted at, a commit in this repository>');
+      if (GSTACK_ACTOR.test((flags['--by'] ?? '').trim())) return invalid('--by names gstack; a test-lane exception is the owner\'s, so --by names who granted it');
+      const open = openShipRun(process.cwd());
+      if (open) return invalid(`/ship run ${open} is open on this checkout: a test-lane exception is the owner's, never the lane's own runner's; record it from the owner's session`);
+      const built = buildRow({ ...testLaneExceptionRow(head.stdout.trim(), files, reason), words: flags['--words'] ?? '', by: flags['--by'] ?? '', date: flags['--date'] }, loc.branch);
+      if ('code' in built) return fail(cmd, built);
+      rows = [built];
+    } else if (cmd === 'rule') {
+      const invalid = (message: string) => fail(cmd, { code: 'APPROVAL_RECORD_INVALID', message });
+      const finding = (flags['--finding'] ?? '').trim(), reason = (flags['--reason'] ?? '').trim();
+      if (!finding || /\s/.test(finding) || !reason) return invalid('rule needs --finding <the finding\'s fingerprint, no spaces> and --reason <why it ships as a note>');
+      if (/[\x00-\x1f\x7f]/.test(reason)) return invalid('--reason is one line: no newline or control character');
+      const head = spawnSync('git', ['rev-parse', '--verify', '--quiet', `${flags['--head'] ?? ''}^{commit}`], { encoding: 'utf8', timeout: 10_000 });
+      if (!flags['--head'] || head.status !== 0) return invalid('rule needs --head <the stop head the owner ruled at, a commit in this repository>');
+      if (GSTACK_ACTOR.test((flags['--by'] ?? '').trim())) return invalid('--by names gstack; a ruling is the owner\'s, so --by names who ruled');
+      const open = openShipRun(process.cwd());
+      if (open) return invalid(`/ship run ${open} is open on this checkout: a ruling is the owner's, never the lane's own runner's; record it from the owner's session`);
+      const built = buildRow({ ...ruledNoteRow(finding, head.stdout.trim(), reason), words: flags['--words'] ?? '', by: flags['--by'] ?? '', date: flags['--date'] }, loc.branch);
+      if ('code' in built) return fail(cmd, built);
+      rows = [built];
+    } else if (cmd === 'add') {
+      if (RULED_NOTE_SCOPE.test(flags['--scope'] ?? '')) return fail(cmd, { code: 'APPROVAL_RECORD_INVALID', message: 'a ruled_note scope is recorded with gstack-approvals rule' });
+      if (TEST_LANE_EXCEPTION_SCOPE.test(flags['--scope'] ?? '')) return fail(cmd, { code: 'APPROVAL_RECORD_INVALID', message: 'a test_lane_exception scope is recorded with gstack-approvals lane-exception' });
       const built = buildRow({ ask: flags['--ask'] ?? '', words: flags['--words'] ?? '', by: flags['--by'] ?? '', scope: flags['--scope'] ?? '', pending: flags['--pending'], outcome: flags['--outcome'], date: flags['--date'], source: flags['--source'] }, loc.branch);
       if ('code' in built) return fail(cmd, built);
       rows = [built];
@@ -126,10 +189,14 @@ function main(argv: string[]): number {
     const res = appendRows(loc, rows);
     if ('code' in res) return fail(cmd, res);
     if (json) process.stdout.write(JSON.stringify({ added: res.added.map(r => r.id), skipped: res.skipped, file: loc.file, mirror: loc.mirror ?? null }) + '\n');
-    else if (cmd === 'add') process.stdout.write(`APPROVAL_RECORDED: ${rows[0]!.id}${res.skipped ? ' (already present)' : ''} ${recorded(loc)}\n`);
+    else if (cmd !== 'import') process.stdout.write(`APPROVAL_RECORDED: ${rows[0]!.id}${res.skipped ? ' (already present)' : ''} ${recorded(loc)}\n`);
     else process.stdout.write(`APPROVAL_IMPORTED: n=${res.added.length} skipped=${res.skipped} ${recorded(loc)}\n`);
     if (res.mirrorError) return fail(cmd, res.mirrorError);
     return EXIT.ok;
+  }
+  if (cmd === 'render' && bools.has('--redacted') && bools.has('--full')) {
+    process.stderr.write('gstack-approvals: --redacted and --full conflict: --redacted forces the public form and --full asks for the rows; pass one\n');
+    return EXIT.usage;
   }
   if (cmd === 'render' || cmd === 'list') {
     const read = readRecord(loc);
@@ -137,12 +204,30 @@ function main(argv: string[]): number {
     if (cmd === 'list' && json) process.stdout.write(JSON.stringify({ branch: loc.branch, state: read.state, rows: read.rows }) + '\n');
     else if (cmd === 'list') for (const r of read.rows) process.stdout.write(`${r.date} ${r.id} ${r.outcome} ${JSON.stringify(r.ask)} words=${JSON.stringify(r.words)} by=${JSON.stringify(r.by)}\n`);
     else {
+      const decl = flags['--plan'] ? parsePlanLine(planText(flags['--plan'])) : null;
+      if (flags['--plan'] && !decl) { process.stderr.write(`gstack-approvals: render --plan needs "Plan: approved: <id> | exempt: <reason> | required"; ${JSON.stringify(flags['--plan'])} is none of them\n`); return EXIT.usage; }
       const visibility = repoVisibility(process.cwd());
-      const mode = renderMode(visibility, bools.has('--full'));
-      if (mode === 'redacted') process.stderr.write(`APPROVALS_RENDER: redacted (repository visibility ${visibility}${bools.has('--full') ? '; --full applies only to a private repository' : ''}); gstack-approvals list shows the full record\n`);
+      const mode = renderMode(visibility, bools.has('--full'), bools.has('--redacted'));
+      const res = decl ? resolvePlan(decl, { cwd: process.cwd(), env: process.env }) : null;
+      if (decl && res && !res.ok && mode === 'redacted' && decl.kind === 'approved') {
+        return fail(cmd, { code: res.failure.code, message: `${res.failure.message}; on a public or unknown-visibility repository render prints no Plan line until it resolves; fix: ${res.failure.fix}` });
+      }
+      if (mode === 'redacted') process.stderr.write(`APPROVALS_RENDER: redacted (${bools.has('--redacted') ? '--redacted; ' : ''}repository visibility ${visibility}${bools.has('--full') ? '; --full applies only to a private repository' : ''}); gstack-approvals list shows the full record\n`);
       process.stdout.write(renderRecord(read, loc, { heading: !bools.has('--no-heading'), mode }));
+      if (decl && res) {
+        const line = mode === 'redacted' ? publicPlanLine(decl, res) : decl.line;
+        const short = !res.ok ? `${res.failure.code} (gstack-approvals plan-check says why)`
+          : mode === 'redacted' && res.record.state === 'approved' ? line.replace(/^Plan: /, '')
+          : `${res.record.state} ${res.record.ref ?? res.record.reason}${res.record.row_id && res.record.row_id !== res.record.ref ? ` row=${res.record.row_id}` : ''}`;
+        process.stdout.write(`${line}\nPlan check: ${short}\n\n`);
+      }
     }
     if (read.state === 'unavailable') return fail(cmd, { code: 'APPROVAL_RECORD_UNAVAILABLE', message: `no record at ${loc.file} and no mirror` });
+    return EXIT.ok;
+  }
+  if (cmd === 'rulings') {
+    const notes = ruledNotes(readRecord(loc).rows);
+    process.stdout.write(notes.length ? notes.map(n => `Ruled note: ${ruledNoteText(n)}\n`).join('') : 'RULED_NOTES: none\n');
     return EXIT.ok;
   }
   if (cmd === 'sync') {

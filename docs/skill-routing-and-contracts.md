@@ -1,8 +1,8 @@
 # Skill routing and skill contracts
 
-Two Claude Code hooks that help a model actually run gstack's skills (GST-1088). Each has one default, `SWITCH_DEFAULT` in `lib/skill-route.ts`; `gstack-config defaults` prints it. With both off nothing changes.
+Two Claude Code hooks that help a model actually run gstack's skills (GST-1088). Each has one default, `SWITCH_DEFAULT` in `lib/skill-route.ts`; `gstack-config defaults` prints it. With both off nothing changes. The opt-in gates that hold one skill rule mid-run (the /plan-ceo-review and /autoplan gates) are in [skill-gates.md](skill-gates.md).
 
-- **Skill routing** (`skill_routing`, a UserPromptSubmit hook). When a prompt matches an installed skill's `triggers:`, the hook adds one line of context naming that skill, for example "this request fits /investigate. Run /investigate with the Skill tool before you start".
+- **Skill routing** (`skill_routing`, a UserPromptSubmit hook). When a prompt matches an installed skill's `triggers:`, the hook adds one line of context naming that skill, for example "this request fits /verify. Run /verify with the Skill tool before you start".
 - **Skill contracts** (`skill_contracts`, a Stop hook). A skill can declare the outputs that must exist before it is done. When the model tries to stop without them, the hook blocks once and names what is missing.
 
 ## Turn them on or off
@@ -35,7 +35,7 @@ The off switch is for people. The text the Stop hook shows the model never menti
 The hook scores the prompt against the `triggers:` list in each installed `SKILL.md` (`~/.claude/skills/*/SKILL.md`, or `$CLAUDE_CONFIG_DIR/skills`). It makes no model call and no network request, and the same prompt always gets the same answer.
 
 - A trigger scores 1 when its whole phrase appears in the prompt. Otherwise it scores the share of its content words (common words dropped, light stemming, so "failing" matches "fails") that the prompt contains. A trigger with one content word counts only on its whole phrase, unless that word has five or more letters and is not a question word.
-- Only /investigate, /review, /qa and /verify route. In the d7 check (PR #3912), scoring every installed skill's triggers sent 17 of 32 non-fit Terminal-Bench prompts to some skill at 0.66; routing only these four sends 4. The other skills wait for their own trigger review.
+- Only /review, /qa and /verify route (/investigate did too until it was cut, GST-1717). In the d7 check (PR #3912), scoring every installed skill's triggers sent 17 of 32 non-fit Terminal-Bench prompts to some skill at 0.66; routing only the four routed skills of that time sent 4. The other skills wait for their own trigger review.
 - The skill with the best score routes when it reaches the threshold, 0.66: both words of a two-word trigger, or two of three.
 - Prompts that start with `/` (you already picked a skill) and prompts over 8,000 characters (pasted logs) are never routed.
 - The injected line names its source and its off switch, and asks the model to tell you in one sentence that gstack routed the request.
@@ -44,14 +44,14 @@ The hook scores the prompt against the `triggers:` list in each installed `SKILL
 
 `gstack-skill-route --explain` shows what the hook would do, with the switch on or off. It never injects anything.
 
-    $ gstack-skill-route --explain "this test fails, fix it"
+    $ gstack-skill-route --explain "run the checks and verify my change"
     switch: skill_routing off (default)
     threshold: 0.66
-    skills: 65 scanned in /home/you/.claude/skills
+    skills: 63 scanned in /home/you/.claude/skills
     candidates:
-      1.00  /investigate  "fix this bug" (2 words)
-      0.67  /ios-fix  "fix this ios bug" (2 words)
-    route: /investigate
+      1.00  /verify  "verify my change" (2 words)
+      0.50  /review  "check my diff" (1 words)
+    route: /verify
     hint: gstack skill routing (UserPromptSubmit hook; ...
 
 Add `--json` for a machine-readable answer, or `--threshold <n>` to see another cutoff. `GSTACK_SKILL_ROUTE_HINT=name|step|contract` picks the hint wording the d6 pilot compares: the skill name only (default), plus the skill's first step, or plus its contract.
@@ -73,11 +73,11 @@ Every item has an `id` (lowercase letters, digits, `.`, `_`, `-`) and a `kind`, 
 | kind | Fields | Met when |
 |---|---|---|
 | `report_labels` | `heading`, `labels[]` | The last assistant message containing the heading has a `Label: value` line for every label, and no value is empty or a placeholder (`[...]`, `<...>`, TBD, TODO, `...`, or a template like `DONE \| BLOCKED`) |
-| `check_after_last_edit` | optional `match` (regular expression) | No Edit, Write, MultiEdit or NotebookEdit happened, or a Bash test or repro command ran after the last one. By default a command counts when, with quoted text removed, one of its parts (split on `&&`, `\|\|`, `;`, `\|`) runs a test runner (pytest, jest, vitest, rspec, tsc, ...), a test or check verb (`npm test`, `go test`, `cargo run`, `make check`, `bun run lint`), code through an interpreter (`node repro.js`, `python -c ...`, `bun scripts/repro.ts`), `curl` against a URL, or a script whose name says test, spec, repro, check, verify or lint, directly or behind a wrapper (`bundle exec rspec`, `uv run pytest`, `docker compose run app pytest`, `xvfb-run npm test`, `bash scripts/test.sh`). Installs, builds, cleans and version probes (`bun install`, `npm install`, `go build`, `make clean`, `node --version`), `git commit --no-verify`, `cat test/a.test.ts` and the shell's `test -f` do not count |
+| `check_after_last_edit` | optional `match` (regular expression) | No edit happened, or a Bash test or repro command ran after the last one. An edit is an Edit, Write, MultiEdit or NotebookEdit call, or a Bash command that writes a file inside the session directory (the transcript's first `cwd`): a `>`, `>>` or `&>` redirect, `tee`, `sed -i` or `perl -i`, `patch` or `git apply`, or an inline or heredoc python, node, ruby, bun or deno script that opens a literal path for writing (directly or through a variable assigned one, as in `python3 - <<'EOF'`), including a script the same command wrote first. A check later in the same Bash command counts (`sed -i ... && bun test`), and so does the command whose output the write captures (`bun test > out.log`, `bun test \| tee test.log`). Reads, output to stdout, fd duplications (`2>&1`), `/dev` paths, targets outside the session directory (`/tmp`, `~`, `../`) and targets named by a variable (`"$f"`) are not edits; `lib/shell-writes.ts` holds the parser (GST-1633). By default a command counts when, with quoted text removed, one of its parts (split on `&&`, `\|\|`, `;`, `\|`) runs a test runner (pytest, jest, vitest, rspec, tsc, ...), a test or check verb (`npm test`, `go test`, `cargo run`, `make check`, `bun run lint`), code through an interpreter (`node repro.js`, `python -c ...`, `bun scripts/repro.ts`), `curl` against a URL, or a script whose name says test, spec, repro, check, verify or lint, directly or behind a wrapper (`bundle exec rspec`, `uv run pytest`, `docker compose run app pytest`, `xvfb-run npm test`, `bash scripts/test.sh`). Installs, builds, cleans and version probes (`bun install`, `npm install`, `go build`, `make clean`, `node --version`), `git commit --no-verify`, `cat test/a.test.ts` and the shell's `test -f` do not count |
 | `selected_specialists_dispatched` | optional `marker`, `empty_marker` | The selection line was printed in an assistant message or a Bash result (never a fetched page or file), its names are plain (letters, digits, spaces, `_`, `.`, `-`, at most 40 characters), and each specialist it names has an Agent dispatch that mentions it. The marker is literal text in which a whole-word N stands for a number; the default is `Dispatching N specialists:`. N = 0 (`Dispatching 0 specialists: (small diff)`) or a "specialists skipped" line means zero specialists were selected, which passes. Text in parentheses is not a name (`Dispatching 1 specialists: State Machines (small diff)` selects State Machines) |
 | `agent_dispatch` | `match` (regular expression, case-insensitive) | An Agent dispatch's description or prompt matches `match`. A `marker` is rejected until the checker can bind it to the dispatch it names (GST-1242) |
 
-A run the skill ended early counts as met: a final `STATUS: BLOCKED` (for /investigate, `Status: BLOCKED` in its DEBUG REPORT) or a final message with a line that starts "Nothing to review" (/review's early exit).
+A run the skill ended early counts as met: a final `STATUS: BLOCKED` (or `Status: BLOCKED` in the skill's report) or a final message with a line that starts "Nothing to review" (/review's early exit).
 
 The checker's default marker strings live in one table, `DEFAULT_MATCHERS` in `lib/skill-contract.ts`; a skill's own `marker`, `empty_marker` or `match` overrides them.
 
@@ -95,9 +95,9 @@ Items are checked against one run of the skill: from its last load to the end of
         - id: repro-after-fix
           kind: check_after_last_edit
 
-A session loads /investigate, edits `src/auth.ts` and answers "Fixed: the null check was missing." with no report and no test run. The Stop hook blocks once with:
+A skill you wrote, `bugfix`, declares that contract. A session loads it, edits `src/auth.ts` and answers "Fixed: the null check was missing." with no report and no test run. The Stop hook blocks once with:
 
-    SKILL_CONTRACT_UNMET investigate (contract v1): missing debug-report, repro-after-fix. Fix: debug-report: print the DEBUG REPORT with real values for Symptom, Root cause, Fix, Evidence; repro-after-fix: run the test or repro again after your last edit and show its result. If an item truly does not apply, run '<gstack>/bin/gstack-skill-contract' waive <item> --reason "<why>" (this session only; counted as a miss for follow). This blocks once.
+    SKILL_CONTRACT_UNMET bugfix (contract v1): missing debug-report, repro-after-fix. Fix: debug-report: print the DEBUG REPORT with real values for Symptom, Root cause, Fix, Evidence; repro-after-fix: run the test or repro again after your last edit and show its result. If an item truly does not apply, run '<gstack>/bin/gstack-skill-contract' waive <item> --reason "<why>" (this session only; counted as a miss for follow). This blocks once.
 
 The model runs `bun test`, prints the DEBUG REPORT, and stops. The record reads `met_after_block`.
 
@@ -109,7 +109,7 @@ The hook checks the most recently loaded skill that declares a contract, and onl
 - the session is headless or unattended (`gstack-session-kind`), or
 - the turn does not end on a question to the user (a last paragraph ending in "?", an AskUserQuestion call, or `NEEDS_CONTEXT`).
 
-So an interactive session that pauses to ask a question is never blocked. When Claude Code says a Stop hook already continued this turn (`stop_hook_active`), the hook never blocks: after its own block it records the result (`met_after_block` or `miss`). On a final turn it also allows the stop while Agent dispatches are still running (no result yet, or launched in the background with no completion notice naming that agent), because their outputs may still arrive, and records the run as `deferred`. Once the same agents have been running for 10 minutes since the stop that first saw them, they count as stalled and the contract is checked at the next stop. Because Claude Code can fire Stop before the turn's last message reaches the transcript file, the hook reads the payload's `last_assistant_message` as the turn's final text.
+So an interactive session that pauses to ask a question is never blocked. When Claude Code says a Stop hook already continued this turn (`stop_hook_active`), the hook never blocks: after its own block it records the result (`met_after_block` or `miss`). On a final turn it also allows the stop while Agent dispatches are still running (no result yet, or launched in the background with no completion notice naming that agent), because their outputs may still arrive, and records the run as `deferred`. Once the same agents have been running for 10 minutes since the stop that first saw them, they count as stalled and the contract is checked at the next stop. Because Claude Code can fire Stop before the turn's last lines reach the transcript file (about 200 ms late in a smoke run), the hook re-reads the file until it holds the payload's `last_assistant_message`, for at most 2 seconds (`readSettledTranscript` in `lib/skill-gates.ts`, the loop the skill gates share). If the message never shows up, it counts that message as the turn's final text. A single read could miss the test rerun after the last edit and block a finished run, or miss the skill load and let an unfinished one through.
 
 It blocks at most once per skill run. If the model stops again with the contract still unmet, the stop is allowed and the run is recorded as a miss.
 

@@ -52,6 +52,7 @@
 # Exit: 0 ok, 1 a component failed, 2 usage, 3 preflight stopped before ./setup.
 set -u
 BASH_COMPAT=50
+GSTACK_BUN_CONFIG=/dev/null; case "${OSTYPE:-}" in msys*|cygwin*) if command -v cygpath >/dev/null 2>&1; then GSTACK_BUN_CONFIG=NUL; fi ;; esac
 
 SELF="$(cd "$(dirname "$0")/.." && pwd -P)"
 ROOT="${GSTACK_CAPY_ROOT:-$SELF}"
@@ -190,7 +191,7 @@ PINS_OUT="" PINS_MODE=none RUNNER="" PIN="" PIN_SRC="" PIN_EXACT="" PIN_ALTS=""
 read_pins() {
   RUNNER="$1" PINS_OUT="" PINS_MODE=none PIN="" PIN_SRC="" PIN_EXACT="" PIN_ALTS=""
   [ -n "$PROJECT" ] && [ "$PROFILE" -eq 0 ] || return 0
-  [ -n "$RUNNER" ] && [ -f "$ROOT/bin/gstack-runtime-pins.ts" ] && PINS_OUT=$("$RUNNER" "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT" 2>/dev/null)
+  [ -n "$RUNNER" ] && [ -f "$ROOT/bin/gstack-runtime-pins.ts" ] && PINS_OUT=$("$RUNNER" --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT" 2>/dev/null)
   if printf '%s\n' "$PINS_OUT" | grep -q '^PINS_VERDICT: '; then
     PINS_MODE=parser
     _exact=$(printf '%s\n' "$PINS_OUT" | sed -n 's/^PIN_EXACT_REQUIRED: bun \([^ ]*\) \([^ ]*\)$/\1 \2/p')
@@ -229,7 +230,7 @@ read_pins() {
 # pins_accept VERSION — the resolver's eligibility hook: VERSION satisfies every project pin.
 pins_accept() {
   case "$PINS_MODE" in
-    parser) "$RUNNER" "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT" --bun "$1" 2>/dev/null | grep -Eq '^PINS_VERDICT: (pass|none)$' ;;
+    parser) "$RUNNER" --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT" --bun "$1" 2>/dev/null | grep -Eq '^PINS_VERDICT: (pass|none)$' ;;
     jq) case "$PIN" in
           '>='*) _gstack_bun_below "$1" "${PIN#>=}"; [ $? -eq 1 ] ;;
           [0-9]*.[0-9]*.[0-9]*) [ "$1" = "$PIN" ] ;;
@@ -352,7 +353,7 @@ fi
 # satisfies the pins, and never installs.
 NODE_STORE=$(gstack_node_store "$GSTACK_STATE_ROOT")
 NODE_BIN="" NODE_VER="" NODE_RULE="" NODE_WANT=""
-node_accept() { ! "$RUNNER" "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT" --node "$1" 2>/dev/null | grep -q '^PIN_FAIL: node '; }
+node_accept() { ! "$RUNNER" --no-env-file --config="${GSTACK_BUN_CONFIG:-/dev/null}" "$ROOT/bin/gstack-runtime-pins.ts" --project "$PROJECT" --node "$1" 2>/dev/null | grep -q '^PIN_FAIL: node '; }
 node_pins_text() { printf '%s\n' "$PINS_OUT" | sed -n 's/^PIN_SUMMARY: //p' | grep '^node' | tr '\n' ';' | sed 's/;$//; s/;/; /g'; }
 if [ "$PINS_MODE" = parser ] && printf '%s\n' "$PINS_OUT" | grep -q '^PIN: node '; then
   _nreq=$(printf '%s\n' "$PINS_OUT" | sed -n 's/^PIN_EXACT_REQUIRED: node \([^ ]*\) \([^ ]*\)$/\1 \2/p')
@@ -625,8 +626,16 @@ EOF_SHIM
 # keeps its ok trailer, whose notes then read
 #   behind=<n> (latest: <ver>); upgrade skipped: <reason> (<CODE>); fix: <command>
 # (below the minimum the bootstrapper fails revision before anything runs).
+# A checkout more than 24 hours behind (bin/gstack-capy-session exports
+# GSTACK_CAPY_STALE) adds `stale=<h>h` after `behind=`, or `stale=<h>h (pinned: <reason>)`
+# for a pin with a recorded reason; a failed fetch with no successful one in 24
+# hours adds `stale=no fetch from origin in <h>h` on its own. Unlike a bare
+# `behind=`, a `stale=` with no pin means: run the fix before the first workflow.
 # A project floor the doctor could not meet (`WARN floor`, PROJECT_FLOOR_UNMET)
-# adds `floor=<ver> (<file>)` and a `fix:` note the same way. A passing run
+# adds `floor=<ver> (<file>)` and a `fix:` note the same way; when no release
+# meets the floor (the row says `no release meets this floor yet`), the note is
+# `floor=<ver> (<file>; no release meets this floor yet)` and no fix rides it,
+# because no install or upgrade can clear it. A passing run
 # whose launch file cannot be written becomes
 #   gstack: fail launch-file — could not write the launch file <path>; fix: <command> (LAUNCH_FILE_UNWRITABLE)
 INSTALLED=$(head -1 "$ROOT/VERSION")
@@ -653,6 +662,7 @@ if [ -n "$BLOCKED" ]; then
 fi
 if [ -n "${GSTACK_CAPY_BEHIND:-}" ]; then
   note "behind=$GSTACK_CAPY_BEHIND (latest: ${GSTACK_CAPY_BEHIND_TO:-${REMOTE_VERSION:-unknown}})"
+  [ -n "${GSTACK_CAPY_STALE:-}" ] && note "stale=$GSTACK_CAPY_STALE"
   [ -n "$BLOCKED" ] && note "upgrade skipped: $BLOCKED_REASON ($BLOCKED_CODE)"
   # The trailer's fix is always one runnable command (the session's: the rerun
   # or bin/gstack-upgrade, which prints its own refusal); the refusal's own
@@ -662,15 +672,23 @@ elif [ -n "$REMOTE_VERSION" ] && [ "$REMOTE_VERSION" != "$INSTALLED" ] \
    && [ "$(printf '%s\n%s\n' "$INSTALLED" "$REMOTE_VERSION" | sort -V | head -1)" = "$INSTALLED" ]; then
   note "latest: $REMOTE_VERSION available"
 fi
+if [ -n "${GSTACK_CAPY_STALE:-}" ] && [ -z "${GSTACK_CAPY_BEHIND:-}" ]; then
+  note "stale=$GSTACK_CAPY_STALE"
+  FIX_NOTE="check network access to origin, then bash ${GSTACK_CAPY_WRAPPER_PATH:-<skill>/scripts/install.sh}${FOR:+ --for $FOR}"
+fi
 # The project floor (the doctor's WARN floor row): the floor and its file ride
 # the trailer, and the fix is the install when it fast-forwards, else the row's.
 FLOOR_ROW=$(printf '%s\n' "$OUT" | grep '^WARN floor — ' | head -1)
 if [ -n "$FLOOR_ROW" ]; then
   FLOOR_VER=$(printf '%s' "$FLOOR_ROW" | sed -n 's/.* is below the floor \([0-9][0-9.]*\) that \(.*\) declares (.*/\1/p')
   FLOOR_FILE=$(printf '%s' "$FLOOR_ROW" | sed -n 's/.* is below the floor [0-9][0-9.]* that \(.*\) declares (.*/\1/p')
-  note "floor=${FLOOR_VER:-unknown} (${FLOOR_FILE:-$GSTACK_PROJECT_FLOOR_FILE})"
-  [ -n "$FIX_NOTE" ] || FIX_NOTE="${GSTACK_CAPY_BEHIND_FIX:-${GSTACK_CAPY_WRAPPER_PATH:+bash $GSTACK_CAPY_WRAPPER_PATH${FOR:+ --for $FOR} (fast-forwards)}}"
-  [ -n "$FIX_NOTE" ] || FIX_NOTE="$ROOT/bin/gstack-upgrade"
+  case "$FLOOR_ROW" in
+    *"no release meets this floor yet"*) note "floor=${FLOOR_VER:-unknown} (${FLOOR_FILE:-$GSTACK_PROJECT_FLOOR_FILE}; no release meets this floor yet)" ;;
+    *)
+      note "floor=${FLOOR_VER:-unknown} (${FLOOR_FILE:-$GSTACK_PROJECT_FLOOR_FILE})"
+      [ -n "$FIX_NOTE" ] || FIX_NOTE="${GSTACK_CAPY_BEHIND_FIX:-${GSTACK_CAPY_WRAPPER_PATH:+bash $GSTACK_CAPY_WRAPPER_PATH${FOR:+ --for $FOR} (fast-forwards)}}"
+      [ -n "$FIX_NOTE" ] || FIX_NOTE="$ROOT/bin/gstack-upgrade" ;;
+  esac
 fi
 [ -n "$FIX_NOTE" ] && note "fix: $FIX_NOTE"
 case "$TRAILER" in "gstack: ok "*)
@@ -691,6 +709,7 @@ esac
 # so no caller is left with only the line and the re-typing path.
 LAUNCH_FILE="${VERDICT%.json}.env"
 BIN_DIR=$(cd "$ROOT/bin" 2>/dev/null && pwd -P)
+CREW_BIN_DIR=$(cd "$ROOT/crew/bin" 2>/dev/null && pwd -P) || CREW_BIN_DIR=""
 write_launch_file() {
   local tmp
   mkdir -p "$(dirname "$LAUNCH_FILE")" || return 1
@@ -701,6 +720,7 @@ write_launch_file() {
     echo "# Never print it or the environment: no \`export \$(...)\`, \`env\`, \`printenv\` or bare \`set\` in a tool fence."
     [ -n "$LAUNCH_DIR" ] && echo "case \":\$PATH:\" in *:$(shq "$LAUNCH_DIR"):*) ;; *) PATH=$(shq "$LAUNCH_DIR"):\"\$PATH\" ;; esac; export PATH"
     [ -n "$BIN_DIR" ] && echo "case \":\$PATH:\" in *:$(shq "$BIN_DIR"):*) ;; *) PATH=\"\${PATH:+\$PATH:}\"$(shq "$BIN_DIR") ;; esac; export PATH"
+    [ -n "$CREW_BIN_DIR" ] && echo "case \":\$PATH:\" in *:$(shq "$CREW_BIN_DIR"):*) ;; *) PATH=\"\${PATH:+\$PATH:}\"$(shq "$CREW_BIN_DIR") ;; esac; export PATH"
     echo "export GSTACK_SESSION_KIND=unattended"
     echo "export GSTACK_STATE_ROOT=$(shq "$GSTACK_STATE_ROOT")"
     echo "export GSTACK_EPHEMERAL=$(shq "${GSTACK_EPHEMERAL:-1}")"

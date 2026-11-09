@@ -6,16 +6,17 @@
  * new neighbours in pre-existing code, fixed them, and the fixes drew another
  * pass until the cycle cap. Under `review_scope: frozen` (the default) the
  * scope is fixed after pass 1: findings in the diff are fixed, findings in
- * code the PR did not change are filed as issues (deferred), and later passes
- * read only the range since the previous pass and fix only blocking findings.
+ * code the PR did not change are deferred and stay on the PR, never filed as
+ * issues, and later passes read only the range since the previous pass and fix
+ * only blocking findings.
  * Everything below the blocking floor is a named note in the PR body and never
  * triggers a pass. `review_scope: all` keeps the old behaviour.
  *
- * Pure functions here; bin/gstack-review-scope runs git and gh.
+ * Pure functions here; bin/gstack-review-scope runs git.
  */
 import * as path from 'node:path';
 import { SPECIALISTS } from './review-depth';
-import { rank, readLedger, type LedgerBlocker } from './review-ledger';
+import { quarantinedIds, rank, readLedger, type LedgerBlocker } from './review-ledger';
 import { parseSpecialistOutput } from './state-matrix';
 
 export type Locus = 'diff' | 'fix-range' | 'outside';
@@ -97,7 +98,7 @@ export function parseHunks(diff: string, untracked: readonly string[] = []): Hun
   return map;
 }
 
-function normalizePath(p: string): string {
+export function normalizePath(p: string): string {
   return p.replace(/\\/g, '/').replace(/^\.\//, '');
 }
 
@@ -124,7 +125,7 @@ export function locusOf(finding: ScopeFinding, diffHunks: HunkMap, rangeHunks: H
   return 'outside';
 }
 
-function fingerprintPath(fp: unknown): string | undefined {
+export function fingerprintPath(fp: unknown): string | undefined {
   if (typeof fp !== 'string' || fp.startsWith('shared-libs:')) return undefined;
   const [path] = fp.split(':');
   return path || undefined;
@@ -234,9 +235,8 @@ export function scopeLine(policy: ReviewScopePolicy, pass: number, scoped: reado
 }
 
 // ---------------------------------------------------------------------------
-// deferral: one issue per blocking finding in code the PR did not change
+// deferral: a blocking finding in code the PR did not change stays on the PR
 // ---------------------------------------------------------------------------
-export const DEFERRED_MARKER = 'gstack-deferred-finding';
 const oneLine = (s: unknown) => String(s ?? '').replace(/[\x00-\x1f\x7f\u2028\u2029]+/g, ' ').trim();
 
 export function findingIdentity(f: ScopeFinding): string {
@@ -250,43 +250,20 @@ function findingText(f: ScopeFinding): string {
   return oneLine(f.summary ?? f.problem ?? f.category ?? 'review finding');
 }
 
-export interface DeferContext { repo?: string; pr?: number; branch?: string; head?: string }
+export interface DeferredRecord { fingerprint: string; path: string; severity: string; stated?: string; summary: string }
 
-/** Issue title and body for a deferred finding; the marker keeps a rerun from filing it twice. */
-export function renderDeferredIssue(f: ScopedFinding, ctx: DeferContext): { title: string; body: string; marker: string } {
-  const text = findingText(f);
-  const title = `Deferred review finding: ${findingWhere(f)} — ${text}`.slice(0, 120);
-  const origin = ctx.pr ? `${ctx.repo ? `${ctx.repo}#${ctx.pr}` : `PR #${ctx.pr}`}` : ctx.branch ? `branch \`${ctx.branch}\`` : 'a /ship run';
-  const marker = `<!-- ${DEFERRED_MARKER}: ${oneLine(findingIdentity(f))} -->`;
+/** The PR's record of a deferred finding: `severity` stays the collected label, `stated` carries what the reviewer wrote beside it. */
+export function deferredRecord(f: ScopedFinding): DeferredRecord {
   const said = [typeof f.stated?.severity === 'string' ? `Severity: ${oneLine(f.stated.severity)}` : '', typeof f.stated?.blocks === 'string' ? `Blocks: ${oneLine(f.stated.blocks)}` : ''].filter(Boolean);
-  const body = [
-    `Filed by /ship's pre-landing review of ${origin}${ctx.head ? ` (head ${ctx.head.slice(0, 12)})` : ''}. The finding is in code that PR did not change, so it was deferred here instead of being fixed there (review scope frozen after pass 1).`,
-    '',
-    `- **Severity:** ${oneLine(f.severity ?? 'unrated')}${said.length ? ` (the reviewer wrote ${said.join(', ')})` : ''}`,
-    `- **Where:** \`${findingWhere(f)}\``,
-    `- **Finding:** ${text}`,
-    ...(f.fix ? [`- **Suggested fix:** ${oneLine(f.fix)}`] : []),
-    ...(f.specialist ? [`- **Found by:** ${oneLine(f.specialist)}`] : []),
-    '',
-    marker,
-    '',
-  ].join('\n');
-  return { title, body, marker };
+  return { fingerprint: findingIdentity(f), path: findingWhere(f), severity: String(f.severity ?? 'unrated'), ...(said.length ? { stated: said.join(', ') } : {}), summary: String(f.summary ?? f.problem ?? f.category ?? '') };
 }
 
-export interface DeferredRecord { fingerprint: string; path: string; severity: string; summary: string; issue: number | null; url?: string; reason?: string }
-/** `defer`'s reason when the marker search found the finding's issue already open; the section renders such a record as a plain `#N`. */
-export const ALREADY_FILED_REASON = 'already filed';
-
-/** The PR-body section for deferred findings: references, never closing keywords, so a merge closes nothing. Only `frozen` defers. */
+/** The PR-body section for deferred findings, which stay on the PR: no issue is filed and no closing keyword is written. Only `frozen` defers. */
 export function renderDeferredSection(deferred: readonly DeferredRecord[], noted: readonly ScopeFinding[] = []): string {
   const out: string[] = [];
   if (deferred.length) {
-    out.push('## Deferred findings', '', 'Blocking findings in code this PR did not change (review scope: frozen); filed as issues and not closed by this PR.', '');
-    for (const d of deferred) {
-      const ref = d.issue ? `#${d.issue}${d.reason && d.reason !== ALREADY_FILED_REASON ? ` (${oneLine(d.reason)})` : ''}` : `unfiled${d.reason ? ` (${oneLine(d.reason)})` : ''}`;
-      out.push(`- Deferred: ${ref} — ${oneLine(d.severity)} \`${oneLine(d.path)}\` ${oneLine(d.summary)}`);
-    }
+    out.push('## Deferred findings', '', 'Blocking findings in code this PR did not change (review scope: frozen). They stay on this PR and are not filed as issues.', '');
+    for (const d of deferred) out.push(`- Deferred: ${oneLine(d.severity)}${d.stated ? ` (the reviewer wrote ${oneLine(d.stated)})` : ''} \`${oneLine(d.path)}\` ${oneLine(d.summary)}`);
     out.push('');
   }
   if (noted.length) {
@@ -389,7 +366,8 @@ export function ledgerPass(ledger: string, key = (id: string) => id): LedgerPass
   const events = readLedger(ledger);
   const started = Date.parse(String(events[0]?.at ?? ''));
   const fixCheck = events.some(e => e.event === 'output' && e.reader === 'fix-check' && e.tree_ok !== false && ((Array.isArray(e.ids) && e.ids.length > 0) || e.review === true));
-  const ids = events.flatMap(e => (e.event === 'output' && Array.isArray(e.ids) ? (e.ids as string[]) : e.event === 'judgment' && e.kind === 'added' && typeof e.id === 'string' ? [e.id] : [])).map(key);
+  const gone = quarantinedIds(events);
+  const ids = events.flatMap(e => (e.event === 'output' && Array.isArray(e.ids) ? (e.ids as string[]).filter(id => !gone.has(id)) : e.event === 'judgment' && e.kind === 'added' && typeof e.id === 'string' ? [e.id] : [])).map(key);
   return { started: Number.isFinite(started) ? started : NaN, fixCheck, ids, name: path.basename(path.dirname(path.resolve(ledger))), judged: events.some(e => e.event === 'judge') };
 }
 
@@ -467,8 +445,8 @@ export function summarizeReviewLoop(rows: readonly Record<string, any>[], since:
     }
   }
   for (const p of ledgerPasses) {
-    const n = /^p(\d+)$/.exec(p.name ?? '')?.[1];
-    if (n && !passes.some(r => String(r.pass) === n)) unbound.push(`pass ${n} (ledger ${p.name}): no review-log row, so its fixes and dispositions cannot be counted`);
+    const n = passNo(p);
+    if (n !== undefined && Number.isFinite(n) && !passes.some(r => String(r.pass) === String(n))) unbound.push(`pass ${n} (ledger ${p.name}): no review-log row, so its fixes and dispositions cannot be counted`);
   }
   const known = ledgerPasses.some(p => p.ids) ? new Set(ledgerPasses.flatMap(p => p.ids ?? [])) : null;
   if (known) for (const [, s] of seen) if (s.ledgerId && !known.has(s.ledgerId)) unbound.push(`ledger_id ${s.ledgerId}: no dispatch ledger of this run collected it`);

@@ -213,7 +213,7 @@ the new defaults.
 | See a case's pass rate across recent weekly runs | `bun run eval:pass-rates --case <case-id>` | Free | `gh` with repo read access |
 | Measure one red case alone against the ship bar (MEETS 9/10) | `bun run scripts/ship-measure.ts measure --case <case-id> --round baseline` ([bar](docs/TESTING_INTERNALS.md#ship-measure)) | API spend for 10 trials (12 for behavior); asks above $2/trial, stops at $25/case | Same as paid coverage |
 | Measure main's flakiest gate cases (the weekly sweep) | `gh workflow run eval-sweep.yml --ref main [-f k=5] [-f cap_usd=150] [-f dry_run=true]`, or locally `bun run scripts/ship-measure.ts sweep --dry-run` ([sweep](docs/TESTING_INTERNALS.md#ship-measure-sweep)) | API spend up to $150 per 7 days (`ship_measure_sweep_budget_usd`); `--dry-run` is free | `gh` with repo read access; CI dispatch needs workflow rights |
-| Replay what the paid gate costs and what each selection or train policy would have cost ([replay](docs/TESTING_INTERNALS.md#replay-gate-cost)) | `bun run scripts/gate-cost-replay.ts --runs <full-gate run ids> --since <date> --until <date>` (screening figures print as screen-provisional, heuristic until T2 lands) | Free; `gh` reads, cached in `.context/gate-cost-cache` | `gh` with repo read access |
+| Replay what the paid gate costs and what each selection or train policy would have cost ([replay](docs/TESTING_INTERNALS.md#replay-gate-cost)) | `bun run crew/scripts/gate-cost-replay.ts --runs <full-gate run ids> --since <date> --until <date>` (screening figures print as screen-provisional, heuristic until T2 lands) | Free; `gh` reads, cached in `.context/gate-cost-cache` | `gh` with repo read access |
 | See the audit success metrics and weekly health | `bun run test:health [--since-days 7] [--json] [--enforce]` | Free; 5–20 minutes of `gh` reads | `gh` with repo read access |
 
 Old command names are listed under [Retired commands](#retired-commands).
@@ -258,7 +258,7 @@ never credentials, private payloads or an entire unreviewed agent transcript.
 |------|--------------|---------------|
 | 1 — Static | `bun run test` (free) | Command validation, snapshot flags, Aside contract pins, render-wrapper option mapping, SKILL.md correctness, TODOS-format.md refs, observability unit tests |
 | 2 — E2E | The sharded paid runner (`bun run eval:bg:pr`, `eval:bg:release`) | Full skill execution via `claude -p`, PTY and Agent SDK sessions |
-| 3 — LLM eval | The same runner; `test/skill-llm-eval*.test.ts` | LLM-as-judge scoring of generated SKILL.md docs |
+| 3 — LLM judge | Inside paid cases, through `test/helpers/llm-judge.ts` | A model scores what a paid run produced |
 
 Pick commands from [Which command do I run?](#which-command-do-i-run).
 
@@ -319,9 +319,7 @@ then spend one paid run with the line's `after a repair:` command. A red census
 on `main` is reported on the weekly tracking issue; a census dispatched on a
 branch writes the same report to its run summary and `census-report` artifact.
 
-CI enables verified first-attempt reuse for 16 workflow quality judges for
-24 hours within the same PR. The cookie workflow's custom input and the other 11
-quality cases stay fresh. PR-profile E2E shards that run once (no retry, so the
+Quality judges always run fresh. PR-profile E2E shards that run once (no retry, so the
 pass is provably a first attempt) reuse a pass from the same PR when every
 consumed input is byte-identical: the test's import closure, every tracked file
 its registered cases' touchfiles and the global touchfiles match, the runner and
@@ -553,23 +551,19 @@ Artifacts are never cleaned up — they accumulate in `~/.gstack-dev/` for post-
 
 ### Tier 3: LLM-as-judge
 
-Uses `claude-fable-5-1` by default to score generated SKILL.md docs on three dimensions.
-Override the judge model per run with `GSTACK_EVAL_MODEL_JUDGE`:
+No test asks a model to grade skill text. The judges that remain score what an
+agent produced, inside their own paid cases (for example
+`test/llm-judge-recommendation.test.ts` and the outcome judges in the QA and design
+E2E files). Facts that several skills must state the same way are checked for free
+instead, for example `test/review-bot-history-facts.test.ts`.
 
-- **Clarity** — Can an AI agent understand the instructions without ambiguity?
-- **Completeness** — Are all commands, flags, and usage patterns documented?
-- **Actionability** — Can the agent execute tasks using only the information in the doc?
-
-Each dimension is scored 1-5 by a panel of 3 samples of the same prompt, drawn
-concurrently; each dimension's panel median (at least 2 of 3 samples) must meet
-that judge's threshold (≥ 4 for most dimensions; see each case). An erroring sample fails the panel. There's also a regression test that compares generated docs against the hand-maintained baseline from `origin/main` — generated must score equal or higher.
-
-Needs `ANTHROPIC_API_KEY` in `.env`. The judge files run in every paid lane
-(`bun run eval:bg:pr` selects the ones your diff touches).
-
-- Resolves the judge model through `lib/eval-model.ts`, using the override order above
-- Tests live in `test/skill-llm-eval.test.ts`
-- Calls the Anthropic API directly (not `claude -p`), so it works from anywhere including inside Claude Code
+The judge model defaults to `claude-fable-5-1`; override it per run with
+`GSTACK_EVAL_MODEL_JUDGE` (resolved through `lib/eval-model.ts`, using the override
+order above). Each scored dimension is a panel of 3 samples of the same prompt, drawn
+concurrently; each dimension's panel median (at least 2 of 3 samples) must meet that
+case's threshold. An erroring sample fails the panel. Needs `ANTHROPIC_API_KEY`.
+`test/helpers/llm-judge.ts` calls the Anthropic API directly (not `claude -p`), so it
+works from anywhere including inside Claude Code.
 
 ### Paid-test touchfiles
 
@@ -814,7 +808,7 @@ Write or change skill prose with `/write-skill` (edit ladder, levels, `gstack-sk
 3. The dynamic template discovery picks it up for every host render and for `gstack/llms.txt`. Two things it does not fill in: a row in `SKILL_REQUIREMENTS` in `lib/doctor-components.ts` (the doctor's `--for <skill>` table; `test/doctor-components.test.ts` fails on a skill directory without one, and the same gen run rerenders `bin/gstack-doctor-components.sh`), and the catalog rows readers find the skill through (README.md, AGENTS.md, `docs/skills.md`, `docs/PROJECT_STRUCTURE.md`, the root `SKILL.md.tmpl` router)
 4. Budget it: run `bun test/helpers/capture-context-budget.ts` and commit the refreshed `test/fixtures/context-budget.json` — the context-budget ratchet fails any skill without a ceiling; the catalog budget (`test/catalog-budget.test.ts`) fails until its cap is ratcheted by the protocol in its failure message, and the number is quoted in CLAUDE.md, this file and `docs/CONTRIBUTOR_REFERENCE.md`
 5. Commit `{skill}/SKILL.md` (and the generated `{skill}/sections/preamble.md` when the template's `preamble-tier` is 2 or higher), external host output is generated at setup time and gitignored
-6. Give it a row in the evidence ledger, `docs/inventory/evidence.json` ([ETHOS.md: 9. Earn Its Place](ETHOS.md#9-earn-its-place)): evidence that it helps on frontier models (`sources`, `models`, `prompt: preset`, `scope`, `masked: true`), or `status: untested` with its `reason`, a concrete `plan` (a `test/fixtures/skill-evals/<skill>/tasks.json` or an /eval-plan preregistration), an `owner` and a `measure_by` date. `test/inventory.test.ts` fails on a skill without a valid row; `bin/gstack-inventory --check` names the problem, and `bin/gstack-inventory` refreshes the dated snapshot in `docs/inventory.md`
+6. Give it a row in the evidence ledger, `docs/inventory/evidence.json` ([ETHOS.md: 9. Earn Its Place](ETHOS.md#9-earn-its-place)): evidence that it helps on frontier models (`sources`, `models`, `prompt: preset`, `scope`, `masked: true`, and `caveats` for any limits on the result), or `status: untested` with its `reason`, a concrete `plan` (a `test/fixtures/skill-evals/<skill>/tasks.json` or an /eval-plan preregistration), an `owner` and a `measure_by` date. `test/inventory.test.ts` fails on a skill without a valid row; `bin/gstack-inventory --check` names the problem, and `bin/gstack-inventory` refreshes the dated snapshot in `docs/inventory.md`
 
 ## Conductor workspaces
 
@@ -921,7 +915,11 @@ This affects all projects. To revert: `git checkout main && git pull && bun run 
 An issue is open, parked or closed, and closed means fixed, duplicate or won't
 fix, each with its reason in the closing comment. An issue we intend to fix
 later stays open under the `parked` label with one comment saying where it is
-tracked (a TODOS.md theme or a tracking issue) and what fixes it. The full rule,
+tracked (a TODOS.md theme or a tracking issue) and what fixes it. An agent
+triaging for the maintainer posts these comments under its bot identity
+(`capy-ai[bot]` on Capy), never the maintainer's own account. On Capy, comment only through
+`tools.pr.comment`, never `gh pr comment`, `gh issue comment` or `gh api`, because
+`gh` runs as the maintainer. The full rule,
 including the labels and the close reasons, is in [docs/triage.md](docs/triage.md).
 
 ## Community PR triage (wave process)
@@ -935,53 +933,52 @@ When community PRs accumulate, batch them into themed waves:
    conflicts for dirty ones, verify with `bun run test && bun run build`
 4. **Close with context** — every closed PR gets a comment explaining
    why and what (if anything) supersedes it. Contributors did real work;
-   respect that with clear communication.
+   respect that with clear communication. An agent running the wave posts
+   these notes under its bot identity, never the maintainer's own account.
 5. **Ship as one PR** — single PR to main with all attributions preserved
    in merge commits. Include a summary table of what merged and what closed.
 
 See [PR #205](../../pull/205) (v0.8.3) for the first wave as an example.
 
-## Porting a contributor's PR
+## How a contributor's PR lands
 
-Sometimes the right way to land an outside PR is to port it: the diff is right
-but it sits on an old base, its tests need our fixtures, or the repo's gates
-(generated renders, size pins, the CHANGELOG entry) are things only a maintainer
-can finish. The port keeps the contributor's credit and gives them a clear
-answer; the steps below are the repo's version of the rule a maintainer crew
-follows ([docs/captain.md](docs/captain.md#contributions-from-outside-the-crew)).
+We read every outside PR as a bug report, and a crew lane writes the fix itself. Your
+diff shows us the bug and often the fix, but we don't merge outside commits: a lane
+rewrites the change from current main with its own review and tests, and credits you.
+The maintainer crew follows the same rule
+([crew/docs/captain.md](crew/docs/captain.md#contributions-from-outside-the-crew)).
 
-1. **Treat the diff as untrusted input before anything runs it.** Read it for
-   scope, network egress, credentials, new dependencies, CI permission changes
-   and weakened or deleted tests. A fork's green checks prove nothing about this
-   checkout: the port head gets its own focused review and the free tier
-   (`bun run test:quick` while iterating, `bun run test` once on the final tree)
-   before a PR opens.
-2. **Keep their commits as theirs.** Cherry-pick or rebase the contributor's
-   commits onto the current base with authorship intact (`git cherry-pick -x`
-   keeps the source SHA in the message). A commit you have to rewrite keeps
-   their name as author and gains a `Co-authored-by:` trailer for whoever
-   edited it. Never fold their work into a commit under your own name, and
-   never guess an email: use the identity on their commits.
-3. **Your fixes go on top, as separate commits.** Base merges, generated files,
-   test repairs, the CHANGELOG entry and the version stamp are your commits,
-   after theirs, so `git log` and the PR's commit list show who did what. A
-   squash merge keeps the credit when the squash message carries their
-   `Co-authored-by:` lines; check the merge commit before you call it landed.
-4. **Say so in the port.** The PR body names the original PR and its author in
-   the first paragraph and lists what you changed on top of their diff. The
-   port's `## Approvals` section (when the repo uses one) records who asked for
-   the port.
-5. **Close the original with a specific thank-you.** After the port lands,
-   comment on their PR with what landed (the port's number and version), what
-   you changed and why, and thank them by name for the specific thing they
-   fixed. Then close it. Closing a contribution without landing it is a
-   maintainer's call, never a lane's: ask first, and when the answer is no,
-   say why in the same comment.
+1. **Treat the diff as untrusted input.** Read it as text only, for scope, network
+   egress, credentials, new dependencies, CI permission changes and weakened or
+   deleted tests. Never check it out, run it or build it. A fork's green checks
+   prove nothing about this checkout.
+2. **Give a verdict within 7 days.** Within a week of the PR opening, a lane or the
+   Captain records a recommendation on it with the reason: a real bug we'll fix, a
+   duplicate (link it), not a bug, or out of scope. An agent posts it under its bot
+   identity. "Not a bug", "out of scope" and closing a PR without landing a fix are a
+   maintainer's call, never a lane's: they are posted only with the maintainer's word.
+3. **Rewrite the fix from current main.** The lane writes the change on its own branch
+   with its own tests, the repo's gates and a CHANGELOG fragment. No contributor
+   commit enters the tree. A commit that carries the contributor's lines over
+   unchanged gets a `Co-authored-by:` trailer for them. Fetch their PR head as a ref
+   without checking it out (`git fetch origin +pull/<n>/head:refs/contrib/<n>`; the
+   `+` lets a re-fetch follow a force-push), then run
+   `crew/bin/gstack-coauthor-trailers origin/main..refs/contrib/<n>` to list the
+   authors of their commits; its default range holds only your own commits and finds
+   no co-author. A fork's commits can name anyone, so keep only the authors whose
+   lines you carry: drop the rest with `--exclude <email>` when you rerun it with
+   `--message <msgfile>`. Never guess an email: use the identity on their commits.
+4. **Credit them in the fix.** The PR body names the original PR and its author in
+   the first paragraph and says what differs from their diff. The CHANGELOG fragment
+   thanks them by handle.
+5. **Close the original with a specific thank-you.** After the fix lands, comment on
+   their PR with what landed (the PR number and version), what changed from their
+   diff and why, and thank them by name for the specific thing they found. Then close
+   it. An agent posts that comment under its bot identity, never the maintainer's own
+   account.
 
-A port is not a rewrite. If the contributor's approach is one you would not
-land, say that on their PR and close or park it under
-[Issue triage](#issue-triage) instead of shipping a different change under
-their name.
+If we won't fix what the PR reports, say why on the PR and close or park it under
+[Issue triage](#issue-triage), with the maintainer's word.
 
 ## Upgrade migrations
 
@@ -1034,6 +1031,12 @@ verifies that all migration scripts in `gstack-upgrade/migrations/` are
 executable and parse without syntax errors.
 
 ## Shipping your changes
+
+Write the pull request title as what changed for someone using gstack, in everyday words, for example
+"Stop gstack from hitting GitHub's rate limit while it waits on PRs". Skip `type(scope):` prefixes, and if
+you reference an issue, put it at the end in parentheses. The "Plain title" check on every pull request
+names any word it refuses; editing the title reruns it. The full rule is in
+[docs/ship-policy.md](docs/ship-policy.md#plain-titles).
 
 When you're happy with your skill edits:
 

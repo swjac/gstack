@@ -485,7 +485,7 @@ do not launch the downstream skill or open a browser.`,
         'Plan File Discovery',
         'MULTI-SPECIALIST CONFIRMED',
         'Cross-model synthesis',
-        'codex review --base',
+        'structured review (large diffs only, 200+ lines)',
       ],
       gateAfterStop: undefined, // operational multi-STOP skill, like ship
     },
@@ -757,10 +757,10 @@ do not launch the downstream skill or open a browser.`,
     // No section-loading paid case yet: a new periodic case would push the
     // periodic census past its 38-slice cap (test/paid-retry-supervision.test.ts).
     behavioral: 'none',
-    maxSkeletonBytes: 84_869, // GSTA-134 skill diet (2026-10-28): lowered from 115_947 to the measured skeleton after the outside voices and test bootstrap moved to sections, 84,869. Before: GSTA-96 hoist merged with v1.91.274.0 (#3507, 2026-10-27): the hoisted skeleton plus main's headroom of 0 bytes; measured 115,947 on the merged tree. Before: measured 137735 on the merged tree with main f27a760 (2026-10-27, #3507); 137767 (2026-10-26; 137773 on 2026-10-25 before the shorter craft-audit trigger): the Section index the external-host carve test requires, its craft-audit row, and the STOP pointer (GSTA-92; Garry 2026-10-25 'Do it' (GSTA-92)).
+    maxSkeletonBytes: 85_182, // /design-review --build (GST-1741 PR 2, 2026-11-07, grant: GStack Minder, 2026-11-07): --build routing, stop pointer, index row, description clause and trigger: +443 B, trimmed 130; the build-loop section is mode-loaded; measured 85,182. Before: GSTA-134 skill diet (2026-10-28): lowered from 115_947 to the measured skeleton after the outside voices and test bootstrap moved to sections, 84,869. Before: GSTA-96 hoist merged with v1.91.274.0 (#3507, 2026-10-27): the hoisted skeleton plus main's headroom of 0 bytes; measured 115,947 on the merged tree. Before: measured 137735 on the merged tree with main f27a760 (2026-10-27, #3507); 137767 (2026-10-26; 137773 on 2026-10-25 before the shorter craft-audit trigger): the Section index the external-host carve test requires, its craft-audit row, and the STOP pointer (GSTA-92; Garry 2026-10-25 'Do it' (GSTA-92)).
     minUnionBytes: 136_100, // GSTA-134 skill diet (2026-10-28): measured union 137,602 (lowered from 143_300); before: measured union 144802 on the merged tree with main f27a760 (2026-10-27, #3507); 145037 (2026-10-26)
     mustContain: ['AI Slop Detection', 'Fix Loop', 'gstack-design-lint', 'Proof beside each claim', 'holds session data'],
-    maxSizeRatio: 1.3001, // GSTA-134 skill diet (2026-10-28): measured 137,602 / 105,842 = 1.30007, rounded up (lowered from 1.3739). Before: GSTA-96 hoist merged with v1.91.274.0 (#3507, 2026-10-27): the union now holds sections/preamble.md (the hoist's owner-approved raise, decision A) on top of main's 1.3681; measured 145,410 / 105,842 = 1.3739 on the merged tree. Before: first parity guard for design-review: measured 144802 / 105,842 = 1.3681 on the merged tree with main f27a760 (2026-10-27, #3507: the design lint swap); before that 145082 / 105,842 = 1.3708 (2026-10-25; 145077 after the /ship review fixes, 145068 = 1.3707 after the line-13 reword, 145049 = 1.3705 after the post-merge /ship review, 145037 = 1.3704 after its second pass, 2026-10-26), the skeleton's growth since v1.64.1.0 plus the craft audit (Garry 2026-10-25 'Do it' (GSTA-92)).
+    maxSizeRatio: 1.357, // /design-review --build (GST-1741 PR 2, 2026-11-07, grant: GStack Minder, 2026-11-07): --build routing, stop pointer, index row, description clause and trigger: +443 B, trimmed 130; the build-loop section is mode-loaded; measured 143,620 / 105,842 = 1.35693. Before: 1.3001, GSTA-134 skill diet (2026-10-28): measured 137,602 / 105,842 = 1.30007, rounded up (lowered from 1.3739). Before: GSTA-96 hoist merged with v1.91.274.0 (#3507, 2026-10-27): the union now holds sections/preamble.md (the hoist's owner-approved raise, decision A) on top of main's 1.3681; measured 145,410 / 105,842 = 1.3739 on the merged tree. Before: first parity guard for design-review: measured 144802 / 105,842 = 1.3681 on the merged tree with main f27a760 (2026-10-27, #3507: the design lint swap); before that 145082 / 105,842 = 1.3708 (2026-10-25; 145077 after the /ship review fixes, 145068 = 1.3707 after the line-13 reword, 145049 = 1.3705 after the post-merge /ship review, 145037 = 1.3704 after its second pass, 2026-10-26), the skeleton's growth since v1.64.1.0 plus the craft audit (Garry 2026-10-25 'Do it' (GSTA-92)).
   },
 
   // ── Token-reduction Phase 4 wave 4 (v1.69.x branch): design doctrine carve ──
@@ -856,48 +856,6 @@ do not launch the downstream skill or open a browser.`,
     maxSkeletonBytes: 18_112, // GSTA-96 hoist (2026-10-27): lowered from 39_900 by the shared preamble that moved to sections/preamble.md, keeping main's headroom of 32 bytes; measured 18,080 on the v1.91.273.0 merge. Before: new skill (GSTA-92 plan item 15, Garry 2026-10-25 "Do it"); measured skeleton 39,836 (2026-10-25)
     minUnionBytes: 57_500, // measured union 58,666 (2026-10-25)
     mustContain: ['window.__start()', 'window.__tick(dt)', 'whole milliseconds averaging 1000/60', 'Content never hides behind animation timing'],
-  },
-
-  // ── Multi-agent wave PR D3 (2026-10-10): investigate recipes carve ──
-  // Five lazy recipes (flake, polluter, race, eval-bisect, backlog) read when
-  // the Recipes list or the --backlog argument matches; How to work, the
-  // Iron Law, the Scope Lock and the Report stay always-loaded (GST-938 dropped
-  // the Phases 1-5 prose: followed in 0 of 46 Opus 5.5 sessions).
-  investigate: {
-    skill: 'investigate',
-    expectedSections: ['flake.md', 'polluter.md', 'race.md', 'eval-bisect.md', 'backlog.md', 'blast-radius.md'],
-    requiredReads: ['flake.md'],
-    scenario:
-      'Walk /investigate in SIMULATION — do not run bash, edit files or acquire a freeze lock. The symptom: test/widget.test.ts fails in CI about one run in eight ("expected 3 events, got 2") and passes locally every time; the PR under review only touched src/widget.ts. Do NOT use AskUserQuestion. Read each pointed section before doing its step, apply the matching recipe, and report the investigation plan: what you would run on main and on the branch, the forced probe, and the exact `## Flake evidence` section you would require in the PR body. Stop before Phase 4.',
-    staticInvariants: {
-      mustStayInSkeleton: [
-        '## Iron Law',
-        '## Arguments',
-        '## How to work',
-        '## Scope Lock',
-        '## Recipes',
-        '## Report',
-        'git update-index --refresh',
-      ],
-      mustPrecedeStop: ['## Arguments'],
-      mustMoveToSection: [
-        '## Flake recipe',
-        '## Polluter recipe',
-        '## Race recipe',
-        '## Eval bisect recipe',
-        '## Backlog mode (`/investigate --backlog`)',
-        '## Flake evidence',
-        'ship-measure.ts free --files',
-        '## Blast radius',
-        'Look where grep stops',
-      ],
-      gateAfterStop: undefined, // operational skill, no plan-mode gate
-    },
-    behavioral: 'prompt',
-    maxSkeletonBytes: 30_210, // GSTA-96 hoist (2026-10-27): lowered from 52_000 by the shared preamble that moved to sections/preamble.md, keeping main's headroom of 377 bytes; measured 29,833 on the v1.91.273.0 merge. Before: D3 carve: Arguments table, Section index, Phase 1 call-site and update-index additions, five STOP pointers; measured 51,532 (2026-10-10). + pstack item 2(b)/8 (Garry 2026-10-26 "do it"): the blast-radius STOP pointer and index row plus the shared-premise red flag; measured 51,623 (2026-10-26), inside the existing cap.
-    minUnionBytes: 55_000, // D3 carve: skeleton + five recipes; measured union 61,513 (2026-10-10)
-    mustContain: ['root cause', 'hypothes', 'Flake evidence', 'still_open', 'already_fixed', 'P(fail | regression)', 'the one fact it is safe because of'],
-    maxSizeRatio: 1.12, // the monolith's cap (parity-harness MONOLITH_INVARIANTS before the carve); measured 61,513 / 60,600 = 1.0151 (2026-10-10). + the blast-radius section (2.8 KB); measured 66,167 / 60,600 = 1.0919 (2026-10-26).
   },
 
   // ── pstack absorb C1 (2026-10-26, Garry "do it"): context-restore's first carve ──

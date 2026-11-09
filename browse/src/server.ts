@@ -156,6 +156,7 @@ let tunnelActive = false;
 let tunnelUrl: string | null = null;
 let tunnelListener: any = null;           // ngrok listener handle
 let tunnelServer: ReturnType<typeof Bun.serve> | null = null; // tunnel HTTP listener
+let tunnelStarting: Promise<StartTunnelResult> | null = null;
 
 export type { Surface };
 
@@ -400,8 +401,14 @@ type StartTunnelResult =
  *
  * On success, sets the module tunnel state (tunnelListener / tunnelUrl /
  * tunnelServer / tunnelActive) and records the tunnel in the state file.
+ * Concurrent calls from either caller share the one in-flight start.
  */
-async function startTunnel(opts: {
+async function startTunnel(opts: Parameters<typeof openTunnel>[0]): Promise<StartTunnelResult> {
+  tunnelStarting ??= openTunnel(opts).finally(() => { tunnelStarting = null; });
+  return tunnelStarting;
+}
+
+async function openTunnel(opts: {
   fetchHandler: (req: Request, server: any) => Promise<Response>;
   authtoken: string;
   consent: string;
@@ -467,6 +474,9 @@ async function startTunnel(opts: {
     try { if (tunnelListener) await tunnelListener.close(); } catch {}
     try { boundTunnel.stop(true); } catch {}
     tunnelListener = null;
+    tunnelServer = null;
+    tunnelUrl = null;
+    tunnelActive = false;
     return { ok: false, stage: 'ngrok', error: err };
   }
 }
@@ -608,7 +618,7 @@ function generateHelpText(): string {
 }
 
 // ─── Buffer (from buffers.ts) ────────────────────────────────────
-import { consoleBuffer, networkBuffer, dialogBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, type LogEntry, type NetworkEntry, type DialogEntry } from './buffers';
+import { consoleBuffer, networkBuffer, dialogBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, formatDialogLogLine, formatNetworkLogLine, type LogEntry, type NetworkEntry, type DialogEntry } from './buffers';
 
 export { consoleBuffer, networkBuffer, dialogBuffer, addConsoleEntry, addNetworkEntry, addDialogEntry, type LogEntry, type NetworkEntry, type DialogEntry };
 
@@ -664,10 +674,7 @@ async function flushBuffers() {
     const newNetworkCount = networkBuffer.totalAdded - lastNetworkFlushed;
     if (newNetworkCount > 0) {
       const entries = networkBuffer.last(Math.min(newNetworkCount, networkBuffer.length));
-      const lines = entries.map(e =>
-        `[${new Date(e.timestamp).toISOString()}] ${e.method} ${e.url} → ${e.status || 'pending'} (${e.duration || '?'}ms, ${e.size || '?'}B)`
-      ).join('\n') + '\n';
-      appendSecureFile(NETWORK_LOG_PATH, lines);
+      appendSecureFile(NETWORK_LOG_PATH, entries.map(formatNetworkLogLine).join('\n') + '\n');
       lastNetworkFlushed = networkBuffer.totalAdded;
     }
 
@@ -675,10 +682,7 @@ async function flushBuffers() {
     const newDialogCount = dialogBuffer.totalAdded - lastDialogFlushed;
     if (newDialogCount > 0) {
       const entries = dialogBuffer.last(Math.min(newDialogCount, dialogBuffer.length));
-      const lines = entries.map(e =>
-        `[${new Date(e.timestamp).toISOString()}] [${e.type}] "${e.message}" → ${e.action}${e.response ? ` "${e.response}"` : ''}`
-      ).join('\n') + '\n';
-      appendSecureFile(DIALOG_LOG_PATH, lines);
+      appendSecureFile(DIALOG_LOG_PATH, entries.map(formatDialogLogLine).join('\n') + '\n');
       lastDialogFlushed = dialogBuffer.totalAdded;
     }
   } catch (err: any) {
@@ -1259,7 +1263,7 @@ async function handleCommandInternalImpl(
       ts: new Date().toISOString(),
       cmd: command,
       aliasOf: isAliased ? rawCommand : undefined,
-      args: args.join(' '),
+      args,
       origin: browserManager.getCurrentUrl(),
       durationMs: successDuration,
       status: 'ok',
@@ -1291,7 +1295,7 @@ async function handleCommandInternalImpl(
       ts: new Date().toISOString(),
       cmd: command,
       aliasOf: isAliased ? rawCommand : undefined,
-      args: args.join(' '),
+      args,
       origin: browserManager.getCurrentUrl(),
       durationMs: errorDuration,
       status: 'error',
@@ -1858,9 +1862,6 @@ export async function start() {
   safeUnlink(NETWORK_LOG_PATH);
   safeUnlink(DIALOG_LOG_PATH);
 
-  const port = await findPort();
-  LOCAL_LISTEN_PORT = port;
-
   // ─── Proxy config (D8 + codex F5) ──────────────────────────────
   // The CLI resolves the proxy (--proxy or env, #915). SOCKS5 with auth runs a
   // local 127.0.0.1 bridge to the authenticated upstream (Chromium can't do
@@ -1945,6 +1946,11 @@ export async function start() {
   }
 
   const startTime = Date.now();
+
+  // The port is probed free and then bound; pick it after the browser launch so the seconds Chromium takes to start are not
+  // a window in which another process can take it (Free Tests 41951644962: "Failed to start server. Is port 43780 in use?").
+  const port = await findPort();
+  LOCAL_LISTEN_PORT = port;
 
   // ─── Build the request handlers via buildFetchHandler factory ───
   // CLI path passes env-derived values; no beforeRoute hook. Phoenix uses

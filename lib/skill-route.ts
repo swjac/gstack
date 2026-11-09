@@ -28,16 +28,20 @@ const MAX_TRIGGER_CHARS = 200;
 const TRACE_MAX_BYTES = 1024 * 1024;
 const FAILURE_SESSIONS_KEPT = 64;
 
-export type SwitchName = 'skill_routing' | 'skill_contracts';
+export type SwitchName = 'skill_routing' | 'skill_contracts' | 'ceo_review_gate' | 'autoplan_gate';
 export const SWITCH_ENV: Record<SwitchName, string> = {
   skill_routing: 'GSTACK_SKILL_ROUTING',
   skill_contracts: 'GSTACK_SKILL_CONTRACTS',
+  ceo_review_gate: 'GSTACK_CEO_REVIEW_GATE',
+  autoplan_gate: 'GSTACK_AUTOPLAN_GATE',
 };
 
 /** Each switch's one default. setup, gstack-config and gstack-skill-route read it through `gstack-skill-route --default <switch>`; the hooks read it here. */
 export const SWITCH_DEFAULT: Record<SwitchName, 'on' | 'off'> = {
   skill_routing: 'off',
   skill_contracts: 'off',
+  ceo_review_gate: 'off',
+  autoplan_gate: 'off',
 };
 
 export function normalizeSwitch(raw: string | null | undefined): 'on' | 'off' | null {
@@ -201,7 +205,7 @@ export function scorePrompt(prompt: string, skills: InstalledSkill[]): RouteCand
  * The skills the hook may route to: plan-v2 decision 4's discovery targets. Run D's prompts showed routing
  * every installed skill's triggers false-routes most non-fit prompts (docs/skill-routing-and-contracts.md).
  */
-export const ROUTED_SKILLS = ['investigate', 'review', 'qa', 'verify'];
+export const ROUTED_SKILLS = ['review', 'qa', 'verify'];
 const isRouted = (name: string) => ROUTED_SKILLS.includes(name.toLowerCase().replace(/^gstack[-:]/, ''));
 
 export type RouteDecision =
@@ -278,7 +282,7 @@ export function readStdinBounded(capBytes: number, ms: number, stream: NodeJS.Re
   });
 }
 
-export type TraceHook = 'skill-route' | 'skill-contract';
+export type TraceHook = 'skill-route' | 'skill-contract' | 'ceo-review-gate' | 'autoplan-gate';
 
 export function traceLogPath(hook: TraceHook, env: NodeJS.ProcessEnv = process.env): string {
   return path.join(resolveStateRoot(env), 'hooks', `${hook}.log`);

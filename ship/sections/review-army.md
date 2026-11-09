@@ -234,7 +234,7 @@ If Codex is available, run a lightweight design check on the diff:
 
 Prompt: "Review the git diff on this branch. Run 7 litmus checks (YES/NO each): 1. Brand/product unmistakable in first screen? 2. One strong visual anchor present? 3. Page understandable by scanning headlines only? 4. Each section has one job? 5. Are cards actually necessary? 6. Does motion improve hierarchy or atmosphere? 7. Would design feel premium with all decorative shadows removed? Flag any hard rejections: 1. Generic SaaS card grid as first impression 2. Beautiful image with weak brand 3. Strong headline with no clear action 4. Busy imagery behind text 5. Sections repeating same mood statement 6. Carousel with no narrative purpose 7. App UI made of stacked cards instead of layout 5 most important design findings only. Reference file:line."
 
-Write the **complete prompt and context**, including actual plan/spec/source, to a private file. Substitute its shell-quoted path for `<prepared-prompt-file>`; never interpolate user text into shell source. Request a severity (Critical, High, Medium or Low) per finding and a final Recommendation: <action> because <specific reason> line, including an explicit no-findings rationale.
+Write the **complete prompt and context**, including actual plan/spec/source, to a private file. Substitute its shell-quoted path for `<prepared-prompt-file>`; never interpolate user text into shell source. Request severity (Critical, High, Medium or Low) per finding, a Recommendation: <action> because <reason> line, and `VERDICT: CLEAN` or `VERDICT: FINDINGS` as the last line.
 
 ```bash
 # GSTACK_ACTIVE_HOST names the harness, never the model.
@@ -253,7 +253,6 @@ _OUTSIDE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/gstack-outside.XXXXXXXX") || exit 1
 trap 'rm -rf "$_OUTSIDE_TMP"' EXIT
 _OUTSIDE_INPUT="$_OUTSIDE_TMP/prompt"
 cat -- '<prepared-prompt-file>' >"$_OUTSIDE_INPUT" || exit 1
-
 _CODEX_PROBE="$HOME/.claude/skills/gstack/bin/gstack-codex-probe"
 _CODEX_OUT=$("$_CODEX_PROBE" select-model exec) || exit 1
 _CODEX_SEL=$(echo "$_CODEX_OUT" | sed -n 's/^CODEX_SEL: //p')
@@ -746,12 +745,9 @@ but missing dispatched output still blocks continuation, even with a QA exceptio
    copied from the hunk, a test name or a commit message.
 
 3.5. **Defer and note the rest.** Run
-   `~/.claude/skills/gstack/bin/gstack-review-scope defer --findings <classified> --pr <pr-number> --out <deferred.json>`
-   (omit `--pr` before a PR exists). It files one issue per `scope: defer` finding,
-   reusing an open issue that carries the finding's marker, scanning the issue text
-   as the PR body is scanned, and prints `DEFERRED:` lines; `unfiled (<reason>)`
-   keeps the finding deferred when gh cannot file it or the scan refuses the text,
-   and the command still exits 0: the PR body carries the reason.
+   `~/.claude/skills/gstack/bin/gstack-review-scope defer --findings <classified> --out <deferred.json>`.
+   It prints a `DEFERRED:` line per `scope: defer` finding and files no issue: a
+   deferred finding stays on this PR, and you never file one as an issue either.
    Then `gstack-review-scope render --deferred <deferred.json> --findings <classified>`
    prints the `## Deferred findings` and `## Review notes` sections: save them for
    Step 19's PR body. Deferred and noted findings are never edited.
@@ -759,7 +755,7 @@ but missing dispatched output still blocks continuation, even with a QA exceptio
    queued adversarial finding after this pass's items 5–6 were logged, append one
    row under its own skill (a tokenless `review` row would read UNVERIFIED):
    `~/.claude/skills/gstack/bin/gstack-review-log '{"skill":"review-late-defer","via":"ship","timestamp":"TIMESTAMP","status":"issues_found","issues_found":0,"critical":0,"informational":0,"pass":PASS,"review_scope":"SCOPE","findings":FINDINGS_JSON}'`
-   with `findings` holding only the deferred records (`action: "deferred"`, `issue`,
+   with `findings` holding only the deferred records (`action: "deferred"`,
    `locus`, `kind`, `blocking`, `ledger_id` as in item 6) and no `--finish` token. Log it in the
    program that decides the defer, with that moment's full ISO 8601 TIMESTAMP, never at Step 19.
 
@@ -811,7 +807,7 @@ but missing dispatched output still blocks continuation, even with a QA exceptio
 - `findings`: checklist, specialist, exploratory QA and queued Steps 10–11 records with
   `{"fingerprint":"path:line:category","severity":"CRITICAL|INFORMATIONAL","action":"ACTION"}`.
   ACTION: `"auto-fixed"`, `"fixed"` (approved), `"skipped"` (explicit Skip),
-  `"deferred"` (with `issue`, the filed number or `null`) or `"noted"`. Copy
+  `"deferred"` or `"noted"`. Copy
   `locus`, `kind`, `blocking`, `raised_by` and `ledger_id` from the classified output onto every finding.
   Merge revalidated invocation decisions by identity and advisory/defect kind;
   preserve `advisory`, `evidence_paths` and `helper_target`.

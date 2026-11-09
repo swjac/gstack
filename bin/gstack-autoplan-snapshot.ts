@@ -26,7 +26,7 @@ export function detectDxScope(activePlan: string, developerTool = false, agentPr
   const content = extractImplementationPlan(readFileSync(source, 'utf8'));
   const terms = dxTermsFor(content);
   return { activePlan: source, sha256: sha256(content), ...terms, developerTool, agentPrimary,
-    dxRequired: terms.dxRequiredByTerms || developerTool || agentPrimary, ...(require('../lib/autoplan-scope') as typeof import('../lib/autoplan-scope')).detectUiScope(content) };
+    dxRequired: terms.dxRequiredByTerms || developerTool || agentPrimary, ...(require('../lib/autoplan-scope') as typeof import('../lib/autoplan-scope')).detectUiScope(content, process.cwd()) };
 }
 
 // The native dispatch payload is assembled from the same immutable bytes as
@@ -516,7 +516,7 @@ function phaseName(phase: string): string {
 function methodologyContent(phase: string, skillFile: string) {
   phaseName(phase);
   const skill = `plan-${phase === 'dx' ? 'devex' : phase}-review`;
-  if (!isAbsolute(skillFile) || basename(skillFile) !== 'SKILL.md') throw new Error('Expected an absolute installed SKILL.md path');
+  if (!isAbsolute(skillFile) || (basename(skillFile) !== 'SKILL.md' && basename(skillFile) !== `${skill}.md`)) throw new Error('Expected an absolute installed SKILL.md path');
   const readPart = (file: string) => {
     const resolved = realpathSync(file);
     if (!statSync(resolved).isFile()) throw new Error('Methodology source must be a regular file');

@@ -30,7 +30,6 @@ export const PR_PROFILE_CASE_IDS = [
   'setup-deploy-workflow', 'context-restore-loads-latest', 'plan-tune-inspect',
   'skillify-provenance-refusal', 'diagram-triplet', 'learnings-show',
   'gstack-upgrade-happy-path',
-  'investigate-owned-completion', 'investigate-owned-abort', 'investigate-owned-ending-error',
   'ship-coverage-value', 'review-test-value', 'test-audit-report-only',
   'office-hours-auto-mode', 'plan-ceo-review-plan-mode',
 ] as const;
@@ -39,8 +38,6 @@ export const PR_PROFILE_CASE_IDS = [
 export const PR_PROFILE_FILES: Record<string, readonly string[]> = {
   'test/skill-e2e-office-hours-auto-mode.test.ts': ['office-hours-auto-mode'],
   'test/skill-e2e-plan-ceo-plan-mode.test.ts': ['plan-ceo-review-plan-mode'],
-  'test/skill-e2e-investigate-owned-completion.test.ts': ['investigate-owned-completion'],
-  'test/skill-e2e-investigate-owned-termination.test.ts': ['investigate-owned-abort', 'investigate-owned-ending-error'],
   'test/skill-e2e-hermetic-canary.test.ts': ['hermetic-canary', 'hermetic-sentinel'],
   'test/skill-e2e-bws.test.ts': ['browse-basic', 'browse-snapshot', 'skillmd-setup-discovery'],
   'test/skill-e2e-qa-workflow.test.ts': ['qa-bootstrap'],
@@ -244,6 +241,8 @@ export const FREE_ONLY_PR_FILES = [
   'scripts/free-test-seed-allowlist.json', // Read only by the free seed ratchet (test/free-seed-ratchet.test.ts).
   'scripts/paid-test-durations.json',
   'scripts/ubicloud/**',
+  'careful/bin/hook-extract.sh', // The careful/freeze hooks' path extractor: free test/hook-scripts.test.ts covers it; no paid case reads it since the /investigate cases retired (GST-1717).
+  'qm/**', // The QM edition (scripts/gen-qm-edition.ts): shipped to QM as a deployment layer, read by no paid case; free test/qm-edition.test.ts covers it (GST-1492).
   'capy/skill/**', // The vendored Capy skill (Drive bootstrapper): run by Capy agents, read by no paid case; test/capy-skill-wrapper.test.ts covers it.
   'USING_GBRAIN_WITH_GSTACK.md', // The /setup-gbrain guide: README, docs/gbrain-quick-tour.md and free tests read it; no skill prompt or paid fixture does (GST-1027).
   'captain/templates/**', // The /captain crew templates (CREW.md, merge-ask.md, slot-call.md, …): copied into a Captain's drive by people and Captains, read by no paid case; free test/captain-skill.test.ts covers them (#3499).
@@ -253,6 +252,7 @@ export const FREE_ONLY_PR_FILES = [
   '.gstack/pregate.json', // gstack's own pre-gate policy: same trust boundary, same reason.
   '.gstack/ship-policy.json', // gstack's own ship policy: gstack-ship-policy/gstack-restamp read it from origin/<base> of the repo they run in; same reason.
   '.gstack/ship-policy.example.json', // The example beside it: only .gitignore and docs/ship-policy.md name it.
+  '.gstack/plain-titles.json', // gstack's own plain-title policy: gstack-plain-title reads it from the repo it runs in and the Plain title check from the base branch; paid cases run in fixture repos.
   '.github/dependabot.yml', // Dependabot's own config: read by GitHub, and by free test/compare-pr-version.test.ts; dependabot runs skip the paid lane.
   '.osv-scanner.toml', // Read by .github/workflows/osv-scanner.yml and the free OSV tests (test/osv-*.test.ts).
   'setup.ps1', // The Windows installer: run only by .github/workflows/windows-setup-e2e.yml; the paid lane is Linux.
@@ -281,6 +281,7 @@ export const FREE_ONLY_PR_FILES = [
   '.github/workflows/native-qualification.yml',
   '.github/workflows/osv-scanner.yml',
   '.github/workflows/platform-qualification.yml',
+  '.github/workflows/plain-title.yml',
   '.github/workflows/pr-title-sync.yml',
   '.github/workflows/quality-gate.yml',
   '.github/workflows/scorecard.yml',
@@ -290,7 +291,7 @@ export const FREE_ONLY_PR_FILES = [
   '.github/workflows/evals-main-backstop.yml', // The merge-train backstop on main: it dispatches evals.yml after a push to main; no PR-gate case reads it, and it never gates a PR.
   '.github/workflows/release-gate.yml', // The 8-hour release gate on main: it dispatches evals.yml on main's head; no PR-gate case reads it, and it never gates a PR.
   '.github/workflows/weekly-release.yml', // The Monday release cut (tag, stable, GitHub Release): reads check runs on main; no paid case reads it, and it never gates a PR.
-  'scripts/release-cut.ts', // The release cut's logic, run only by weekly-release.yml; covered by the free test/release-cut.test.ts.
+  'crew/scripts/release-cut.ts', // The release cut's logic, run only by weekly-release.yml; covered by the free crew/test/release-cut.test.ts.
   '.github/actionlint.yaml', // Runner labels for actionlint only.
   'scripts/ship-measure-sweep.ts', // The weekly sweep CLI; it launches paid cases, never runs inside one.
   '.github/workflows/version-gate.yml',
@@ -326,6 +327,13 @@ export const PR_FULL_GATE_FILES = [
   'scripts/resolvers/preamble.ts', 'scripts/resolvers/preamble/**', 'scripts/resolvers/runtime-root.ts',
   'test/helpers/periodic-exclude-data.ts',
 ] as const;
+
+/**
+ * Full-gate inputs a narrow screen derives like any other file. No paid run executes ./setup (evals.yml only
+ * builds) and scripts/pr-dependencies.ts maps it to the cases that invoke it; pull_request runs, broad screens
+ * and --profile full still restore the full gate for it, and the train gate's full census runs every case.
+ */
+export const NARROW_DERIVED_FULL_GATE_FILES = ['setup'] as const;
 
 /** Periodic- and marathon-lane workflows: the PR gate never runs a case under them; their branch dispatch validates them. */
 export const PERIODIC_ONLY_PR_FILES = ['.github/workflows/evals-periodic.yml', '.github/workflows/evals-marathon.yml'] as const;
@@ -462,7 +470,9 @@ export function selectPrProfile(options: {
     ? [...consumers.keys()].filter(file => derived?.tracked.has(file) && gateIds.every(id => consumers.get(file)!.e2e.has(id))) : [];
   const derivedFiles = [...consumers.keys()].filter(file => !hubFiles.includes(file));
   const unknownFiles = unmapped.filter(file => !derivedGlobal.includes(file) && !consumers.has(file) && !noConsumerFiles.includes(file));
-  const sharedInputs = files.filter(file => depends(file, PR_FULL_GATE_FILES));
+  const fullGateFiles = options.screenPolicy === 'narrow'
+    ? PR_FULL_GATE_FILES.filter(file => !(NARROW_DERIVED_FULL_GATE_FILES as readonly string[]).includes(file)) : PR_FULL_GATE_FILES;
+  const sharedInputs = files.filter(file => depends(file, fullGateFiles));
   const fallback = unknownFiles.length > 0 || sharedInputs.length > 0;
   const dependentsMode = !fallback && derivedFiles.length > 0;
   const derivedE2E = derivedFiles.flatMap(file => [...consumers.get(file)!.e2e]);
@@ -488,7 +498,7 @@ export function selectPrProfile(options: {
           ? `Its test file changed, but the PR lane cannot select it by name; name its Bun test '${id}' (testIfSelected) to run it on PRs`
           : 'Broad gate census/release coverage; outside the fast PR profile',
   }));
-  const noQuickCoverage = files.filter(file => isPromptFile(file)
+  const noQuickCoverage = files.filter(file => isPromptFile(file) && (!derived || fs.existsSync(path.join(ROOT, file)))
     && !(depends(file, maps.globalTouchfiles) && (e2e.length > 0 || judges.length > 0))
     && !e2e.some(id => depends(file, maps.e2eTouchfiles[id]))
     && !judges.some(id => depends(file, maps.judgeTouchfiles[id])));

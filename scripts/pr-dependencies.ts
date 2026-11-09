@@ -69,7 +69,7 @@ const CODE = /\.(?:[cm]?[jt]s|tsx|jsx)$/;
 /** An extensionless script Bun or Node runs: its imports are code, not shell. */
 const CODE_SHEBANG = /^#![^\n]*\b(?:bun|node)\b/;
 const TEXT = /\.(?:[cm]?[jt]s|tsx|jsx|sh|md|tmpl|json|ya?ml|toml|txt|py)$/;
-const REPO_PATH = /(?:^|[^\w.@-])((?:bin|lib|scripts|browse|design|make-pdf|hosts|extension|model-overlays|agents|capy|test\/helpers|test\/fixtures)\/[\w.@-]+(?:\/[\w.@-]+)*)/g;
+const REPO_PATH = /(?:^|[^\w.@-])((?:bin|lib|scripts|browse|design|make-pdf|hosts|extension|model-overlays|agents|capy|modules|test\/helpers|test\/fixtures)\/[\w.@-]+(?:\/[\w.@-]+)*)/g;
 /** `path.join(ROOT, 'lib', 'x.ts')`: a top-level directory and its entry as separate string literals. */
 const JOINED_PATH = /['"`](bin|lib|scripts|browse|design|make-pdf|hosts|extension|model-overlays|agents)['"`]\s*,\s*['"`]([\w.@-]+)['"`]/g;
 const BIN_NAME = /\bgstack-[a-z0-9][a-z0-9-]*[a-z0-9]\b/g;
@@ -89,7 +89,7 @@ export const SELECTION_DATA_MODULES: readonly string[] = [
   // The build entry list: every compiled binary, which skills reach through their `--outfile` path instead.
   'scripts/build.sh',
   // The reason-code table: its `fix:` prose names the command a person reruns, not a file the module consumes.
-  'lib/result-codes.ts', 'lib/result-codes-release.ts', 'lib/result-codes-capy.ts', 'lib/result-codes-budget.ts', 'lib/result-codes-eval.ts', 'lib/result-codes-plan.ts', 'lib/result-codes-autoplan.ts', 'lib/result-codes-browse.ts', 'lib/result-codes-clean.ts',
+  'lib/result-codes.ts', 'lib/result-codes-release.ts', 'lib/result-codes-capy.ts', 'lib/result-codes-budget.ts', 'lib/result-codes-eval.ts', 'lib/result-codes-plan.ts', 'lib/result-codes-autoplan.ts', 'lib/result-codes-browse.ts', 'lib/result-codes-clean.ts', 'lib/result-codes-plain.ts',
   // The exercised-path map: observed commands per case, read only by exercisedConsumers() (shadow data; a change selects no paid case).
   'test/helpers/exercised-commands.json',
 ];

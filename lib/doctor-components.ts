@@ -134,7 +134,6 @@ export function capyBootstrapCommand(skill: string, root: string = CAPY_INSTALL_
 export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   autoplan: PLANNING,
   'plan-ceo-review': PLANNING,
-  'plan-eng-review': PLANNING,
   'plan-design-review': PLANNING,
   'plan-devex-review': PLANNING,
   'plan-tune': PLANNING,
@@ -142,7 +141,6 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
   spec: PLANNING,
   review: PLANNING,
   ship: PLANNING,
-  investigate: PLANNING,
   codex: { requires: ['claude', 'codex', 'patch', 'codex-cli'], optional: [] },
   cso: { requires: ['claude', 'cso'], optional: [] },
   browse: BROWSER,
@@ -208,7 +206,7 @@ export const SKILL_REQUIREMENTS: Readonly<Record<string, SkillRequirement>> = {
  * required.
  */
 export const PINS_ADVISORY_SKILLS: readonly string[] = [
-  'autoplan', 'plan-ceo-review', 'plan-eng-review', 'plan-design-review', 'plan-devex-review', 'office-hours',
+  'autoplan', 'plan-ceo-review', 'plan-design-review', 'plan-devex-review', 'office-hours',
 ];
 
 /** Rows always evaluated and required, in print order. */

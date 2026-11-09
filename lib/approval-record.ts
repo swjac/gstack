@@ -32,7 +32,7 @@ import { capyDriveFolder } from './autoplan-checkpoint';
 import { reviewedPlan } from './captain-brief';
 import { slugFromEnvironment } from './bin-context';
 import { firstTitle } from './markdown-sections';
-import { scan } from './redact-engine';
+import { scan, type Finding } from './redact-engine';
 import type { ResultCodeName } from './result-codes';
 import { resolveStateRoot } from './state-root';
 
@@ -43,6 +43,8 @@ export const CAPS = { ask: 300, words: 2000, scope: 300, pending: 300, by: 120, 
 export interface ApprovalRow {
   schema_version: 1; id: string; date: string; ask: string; words: string; by: string;
   scope: string; pending: string; outcome: Outcome; source: string; branch: string; recorded_at: string;
+  /** Set by import when the gate was answered in an agent's own words (--words-by); lib/plan-record.ts refuses such a row as a plan approval. */
+  words_by?: string;
 }
 export type MirrorSource = 'GSTACK_APPROVALS_DIR' | 'captain drive' | 'project-user drive';
 /** `mirror` is written and read; `read_also` are the other mirror roots' copies, read so a row mirrored under an earlier rule stays visible. */
@@ -149,8 +151,19 @@ function validDate(d: string): boolean {
 
 export interface NewRow { ask: string; words: string; by: string; scope: string; pending?: string; outcome?: string; date?: string; source?: string }
 
-/** Validate and secret-scan one row; the error names the field and rule, never the text. */
-export function buildRow(input: NewRow, branch: string, now = new Date()): ApprovalRow | RecordError {
+/** An autoplan run id as gstack-autoplan mints it: the run directory's name, a hyphen, then a 14-digit time stamp. */
+const MINTED_RUN_ID = /^[A-Za-z0-9._-]{1,64}-\d{14}$/;
+/** The part of a minted run id the exemption covers: the 14-digit stamp and, when the name ends in a thread code, its digits. */
+const RUN_ID_STAMP = /(?:(?<!\d)\d{1,6}-)?\d{14}$/;
+
+/**
+ * Validate and secret-scan one row; the error names the field and rule, never the text. `runId` (import only) is a
+ * minted autoplan run id and the offset where the importer placed it in each field: pii.phone.e164 and pii.cc read its
+ * stamp, alone or with the thread-code digits of the directory name before it, as a phone or card number (GST-2047), so
+ * a finding of those two rules that starts inside that stamp part of the id, at that offset, is skipped. Anything else
+ * in the field, the rest of the directory name included, and the same id typed anywhere else, is scanned as usual.
+ */
+export function buildRow(input: NewRow, branch: string, now = new Date(), runId?: { id: string; at: Partial<Record<'ask' | 'source', number>> }): ApprovalRow | RecordError {
   const fields = { ask: input.ask, words: input.words, by: input.by, scope: input.scope, pending: input.pending ?? 'none', source: input.source ?? 'manual' };
   for (const [k, v] of Object.entries(fields)) {
     if (typeof v !== 'string' || !v.trim()) return { code: 'APPROVAL_RECORD_INVALID', message: `--${k} is required` };
@@ -163,7 +176,10 @@ export function buildRow(input: NewRow, branch: string, now = new Date()): Appro
   if (!validDate(date)) return { code: 'APPROVAL_RECORD_INVALID', message: `--date must be a real YYYY-MM-DD day` };
   for (const [k, v] of Object.entries(fields)) {
     const s = scan(v);
-    const hits = s.findings.filter(f => f.severity === 'HIGH' || f.severity === 'MEDIUM');
+    const at = runId && MINTED_RUN_ID.test(runId.id) ? runId.at[k as 'ask' | 'source'] : undefined;
+    const stamp = at === undefined ? 0 : RUN_ID_STAMP.exec(runId!.id)![0].length;
+    const inRunId = (f: Finding) => at !== undefined && (f.id === 'pii.phone.e164' || f.id === 'pii.cc') && f.line === 1 && f.col - 1 >= at + runId!.id.length - stamp && f.col - 1 < at + runId!.id.length;
+    const hits = s.findings.filter(f => (f.severity === 'HIGH' || f.severity === 'MEDIUM') && !inRunId(f));
     if (s.oversize || hits.length) return { code: 'APPROVAL_RECORD_SECRET', message: `field ${k}: ${s.oversize ? 'oversize input' : [...new Set(hits.map(f => f.id))].join(', ')}` };
   }
   const id = 'a-' + createHash('sha256').update([fields.source, date, fields.ask, fields.words, fields.by].join('\u0000')).digest('hex').slice(0, 12);
@@ -244,12 +260,34 @@ export function repoVisibility(cwd: string, env: Env = process.env): RepoVisibil
 }
 
 /**
- * Full rows only where the repository is known private, or --full asks for them and GitHub does not report it public.
+ * Full rows only where the repository is known private, or --full asks for them and GitHub does not report it public;
+ * --redacted forces the redacted block anywhere, for a private repository that may go public.
  * A PR description keeps every earlier version in its edit history, so a public or unknown repository gets the
  * redacted block: whether anything was approved and an opaque id of the record (a hash of its row ids), nothing else.
  */
-export function renderMode(visibility: RepoVisibility, full: boolean): 'full' | 'redacted' {
+export function renderMode(visibility: RepoVisibility, full: boolean, redacted = false): 'full' | 'redacted' {
+  if (redacted) return 'redacted';
   return visibility === 'private' || (full && visibility === 'unknown') ? 'full' : 'redacted';
+}
+
+const LOCAL_PATH = /(?<![\w.~/\\])(?:file:\/{1,2}[^\s|,;'"()<>]+|(?:~[\w.-]*|\$HOME|\$\{HOME\}|%USERPROFILE%|[A-Za-z]:)[\\/][^\s|,;'"()<>]+|\\\\[^\s\\|,;'"()<>]+\\[^\s|,;'"()<>]+|(?:[\w.-]+[\\/])*\.capy[\\/]drive[\\/][^\s|,;'"()<>]+|\/[^\s/\\|,;'"()<>]+\/[^\s|,;'"()<>]*)/gi;
+const HOME_DIR = /^(?:(?:~[\w.-]*|\$HOME|\$\{HOME\}|%USERPROFILE%)[\\/]?|\/(?:home|Users)\/[^/]+\/?|[A-Za-z]:[\\/]Users[\\/][^\\/]+[\\/]?)$/i;
+
+/**
+ * A table cell with each local path replaced by `…/<file name>` (a bare home directory by `~`): absolute, home
+ * (`~`, `~user`, `$HOME`, `%USERPROFILE%`), Windows-drive, UNC and `file:` paths, also glued onto a `:` or `-` (a `://` scheme prefix is never a path), and Drive-relative ones
+ * (`.capy/drive/…`). The file name tells a reader what the approval counted; the directories above it name the
+ * machine, the user and the Drive scope (`project-user-<project>-<person>`). A path cut by a space keeps the words
+ * after the space. `gstack-approvals list` keeps the full path.
+ */
+export function pathLabels(text: string): string {
+  return text.replace(LOCAL_PATH, m => {
+    const tail = /[.:]*$/.exec(m)![0];
+    const p = m.slice(0, m.length - tail.length).replace(/^file:\/*(?:localhost)?(?=\/)/i, '');
+    if (HOME_DIR.test(p)) return '~' + tail;
+    const name = p.split(/[\\/]/).filter(Boolean).pop();
+    return name ? `…/${name}${tail}` : m;
+  });
 }
 
 export function renderRecord(read: ReadResult, loc: StoreLocation, o: { heading?: boolean; mode?: 'full' | 'redacted' } = {}): string {
@@ -257,14 +295,14 @@ export function renderRecord(read: ReadResult, loc: StoreLocation, o: { heading?
   if (o.mode === 'redacted' && read.rows.length) {
     const approved = read.rows.some(r => r.outcome === 'approved' || r.outcome === 'standing');
     const id = 'r-' + createHash('sha256').update(read.rows.map(r => r.id).sort().join('\n')).digest('hex').slice(0, 12);
-    return [...head, `Approved: ${approved ? 'yes' : 'no'} (record ${id}). The full approval record stays private: this repository is public or its visibility is unknown.`, ''].join('\n');
+    return [...head, `Approved: ${approved ? 'yes' : 'no'} (record ${id}). The full approval record stays private.`, ''].join('\n');
   }
   if (read.state === 'unavailable') return [...head, `Record unavailable on this machine: no approval record for branch ${cell(loc.branch)} here, and the state root is ephemeral with no Drive mirror, so this is not proof that nothing was approved.`, ''].join('\n');
   if (!read.rows.length) return [...head, `No approvals recorded for branch ${cell(loc.branch)}.`, ''].join('\n');
   const lines = [APPROVALS_TABLE_HEADER, '|---|---|---|---|---|---|'];
   for (const r of read.rows) {
     const outcome = r.outcome === 'standing' ? 'standing approval' : r.outcome;
-    lines.push(`| ${r.date} | ${cell(r.ask)} | “${cell(r.words, 280)}” (${cell(r.by)}) | ${outcome} | ${cell(r.scope)} | ${cell(r.pending)} |`);
+    lines.push(`| ${r.date} | ${cell(pathLabels(r.ask))} | “${cell(r.words, 280)}” (${cell(r.by)}) | ${outcome} | ${cell(pathLabels(r.scope))} | ${cell(pathLabels(r.pending))} |`);
   }
   return [...head, ...lines, '', `Source: gstack-approvals record for ${cell(loc.branch)} ${APPROVALS_FOOTER_END}`, ''].join('\n');
 }
@@ -324,8 +362,9 @@ export function importAutoplan(runDir: string, branch: string, by?: string): App
     const checked = [...new Set(items.map(r => r.carry_check).filter((c): c is string => !!c))];
     const scope = [`the reviewed plan (sha256 ${planSha}), ${changed.length ? `${changed.length} recommendation(s) changed: ${changed.map(r => stripRef(r.title ?? '')).join('; ')}` : 'every recommendation taken'}`,
       unseen.length ? `taken under "do it", not seen by the owner: ${unseen.join('; ')}` : '', checked.length ? `post-cap delta checked by ${checked.join(', ')}` : ''].filter(Boolean).join('; ');
+    const askHead = `Approve the plan "${planTitle}" (autoplan run `;
     const built = buildRow({
-      ask: `Approve the plan "${planTitle}" (autoplan run ${runId}, ${carried ? `gate_rev ${rev} carried forward from gate_rev ${carried.carried_gate_rev}, ` : ''}${items.length + (p1 ? 1 : 0)} decisions)`.slice(0, CAPS.ask),
+      ask: `${askHead}${runId}, ${carried ? `gate_rev ${rev} carried forward from gate_rev ${carried.carried_gate_rev}, ` : ''}${items.length + (p1 ? 1 : 0)} decisions)`.slice(0, CAPS.ask),
       words: first.owner_reply ?? first.answer_words ?? first.reply ?? '(no words recorded)',
       by: who.slice(0, CAPS.by),
       scope: scope.slice(0, CAPS.scope),
@@ -333,9 +372,9 @@ export function importAutoplan(runDir: string, branch: string, by?: string): App
       outcome,
       date: first.answered_at!.slice(0, 10),
       source: `autoplan:${runId}@gate_rev=${rev}`,
-    }, branch, new Date(first.answered_at!));
+    }, branch, new Date(first.answered_at!), { id: runId, at: { ask: askHead.length, source: 'autoplan:'.length } });
     if ('code' in built) return built;
-    out.push(built);
+    out.push(first.words_by ? { ...built, words_by: first.words_by } : built);
   }
   return out;
 }

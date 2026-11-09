@@ -75,6 +75,19 @@ describe('pregate secrets: source context and diff integrity', () => {
     expect(r.lines.join('\n')).toContain('app.py, line 5)');
   });
 
+  // Value: protects=pregate's secrets check reads a four-part version written to a VERSION file, or the file itself, as a version, and lists a
+  //   LOW privacy finding as a warning that never fails or warns the check, while a public IP with no version context still warns and a key
+  //   still fails (GST-2047); fails_when=gstack-evals' pv-sdk.ts VERSION write warns as pii.ip_public, a home path turns the check warn or fail,
+  //   or 8.8.8.8 and AKIA keys stop reporting; why_new=the engine tables test the scanner, not the check's status; seam=fixture repo; no_claim=CI
+  test('a version beside a VERSION file passes and a home path only warns; a bare public IP still warns and a key still fails (GST-2047)', () => {
+    expect(repo({ 'pv-sdk.ts': 'fs.writeFileSync(path.join(dir, "VERSION"), "1.98.0.0\\n");\n', VERSION: '1.98.0.0\n' }).secrets()).toMatchObject({ status: 'pass', lines: [] });
+    const low = repo({ 'notes.md': 'logs are under /home/garry/work/run.log\n' }).secrets();
+    expect([low.status, low.detail]).toEqual(['pass', expect.stringContaining('(1 WARN)')]);
+    const ip = repo({ 'dns.ts': 'const resolver = "8.8.8.8";\n' }).secrets();
+    expect([ip.status, ip.lines.join('\n')]).toEqual(['warn', expect.stringContaining('pii.ip_public')]);
+    expect(repo({ 'notes.md': `logs are under /home/garry/work/run.log\nkey ${AWS}\n` }).secrets().status).toBe('fail');
+  });
+
   test('parseAddedLineNumbers numbers each added line from its hunk header', () => {
     const diff = ['diff --git a/a.py b/a.py', '--- a/a.py', '+++ b/a.py', '@@ -3,0 +4,2 @@', '+one', '+two', '@@ -9 +11 @@', '-old', '+new'].join('\n');
     expect([...parseAddedLineNumbers(diff)]).toEqual([['a.py', [4, 5, 11]]]);
@@ -163,6 +176,17 @@ describe('pregate secrets: source context and diff integrity', () => {
       const check = JSON.parse(r.out).checks.find((c: { id: string }) => c.id === 'secrets');
       expect({ status: check.status, kv: (check.lines as string[]).some((l) => l.includes('env.kv') && l.includes('app.py')) }).toEqual({ status: 'fail', kv: true });
     } finally { cleanup(fx); }
+  });
+
+  test('a test file reading an env var in code and holding a self-named fixture label passes; a literal beside the read or in a .env file still fails (GST-1894)', () => {
+    const token = '8Fk2pQ9vXz4wL7mN3rT6yB1cD5eG0hJ';
+    const qm = 'let token: string | undefined;\nfunction start(opts?: { env?: Record<string, string> }) {\n    token = opts?.env?.AGENT_API_TOKEN;\n}\nconst brain = {\n      clientSecret: "personal-secret",\n};\n';
+    expect(repo({ 'memory-registry-pg.test.ts': qm }).secrets().status).toBe('pass');
+    const r = repo({ 'memory-registry-pg.test.ts': qm.replace('AGENT_API_TOKEN;', `AGENT_API_TOKEN ?? "${token}";`), 'agent.env': `AGENT_API_TOKEN=${token}\n` }).secrets();
+    expect(r.status).toBe('fail');
+    const kv = r.lines.filter((l) => l.includes('env.kv'));
+    expect(kv).toHaveLength(2);
+    expect(kv).toEqual(expect.arrayContaining([expect.stringContaining('agent.env, added line 1'), expect.stringContaining('memory-registry-pg.test.ts, added line 3')]));
   });
 
   test('the same assignment in a .env file still fails, naming the file', () => {

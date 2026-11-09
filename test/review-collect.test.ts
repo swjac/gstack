@@ -3,7 +3,7 @@ import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { collectCommit, collectLive, CONSUMER_SCAN_CAP, CONSUMER_SCAN_TIMEOUT_MS, consumerScanTimeoutMs, grepConsumers, loadRegistryAt, scanConsumers } from '../lib/review-collect';
+import { collectCommit, collectLive, CONSUMER_SCAN_CAP, CONSUMER_SCAN_TIMEOUT_MS, consumerScanTimeoutMs, grepConsumers, loadRegistryAt, REVIEW_PLAN_TIMEOUT_MS, scanConsumers } from '../lib/review-collect';
 import { depthOfCommitInput } from '../lib/review-depth';
 
 const dirs: string[] = [];
@@ -352,9 +352,40 @@ describe('GST-544: the consumer scan reads only files that can match, under one 
   // Value: protects=a slow scan ends in its own fail-closed consumer_scan_failed, not in the parent killing gstack-review-plan;
   //   fails_when=the scan deadline reaches the timeout the dispatch and preflight callers give the whole plan; seam=caller source
   test('the default scan deadline leaves a minute of the plan timeout its callers set', () => {
-    const callers = ['bin/gstack-review-dispatch', 'lib/ship-preflight.ts'].map(f => fs.readFileSync(path.join(import.meta.dir, '..', f), 'utf8'));
-    const limits = callers.flatMap(src => [...src.matchAll(/gstack-review-plan'[^\n]*?(?:timeout: |\], )(\d[\d_]+)/g)].map(m => Number(m[1]!.replace(/_/g, ''))));
+    const callers = ['lib/ship-preflight.ts'].map(f => fs.readFileSync(path.join(import.meta.dir, '..', f), 'utf8'));
+    const dispatch = fs.readFileSync(path.join(import.meta.dir, '..', 'bin/gstack-review-dispatch'), 'utf8');
+    expect(dispatch).toMatch(/import \{ REVIEW_PLAN_TIMEOUT_MS \} from '\.\.\/lib\/review-collect'/);
+    const limits = [REVIEW_PLAN_TIMEOUT_MS, ...callers.flatMap(src => [...src.matchAll(/gstack-review-plan'[^\n]*?(?:timeout: |\], )(\d[\d_]+)/g)].map(m => Number(m[1]!.replace(/_/g, ''))))];
     expect(limits.length).toBeGreaterThanOrEqual(2);
     expect(CONSUMER_SCAN_TIMEOUT_MS).toBeLessThanOrEqual(Math.min(...limits) - 60_000);
+  });
+});
+
+describe('executables at a commit cost a few git calls, not one per data file (GST-1855)', () => {
+  // Value: protects=a results PR's thousands of data files cost a few git calls in collectCommit, not one blob read each
+  //   (harness-evals #320's fix range: 10,914 reads, about 200 s per collect); fails_when=executablesAt reads every candidate
+  //   blob with its own git process again; seam=collectCommit with a git shim on PATH that logs each call
+  test.skipIf(process.platform === 'win32')('only blobs with a line starting "#!" are read, and a shebang still lists the path', () => {
+    const r = repo({});
+    const trials = Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`results/t${i}/trial.json`, `{"i":${i}}\n`]));
+    const head = r.commit({ ...trials, 'results/run.log': 'ok\n#!/bin/sh quoted in a log\n', 'results/logs/prune': '#!/bin/sh\nrm -rf "$1"\n' });
+    const shim = fs.mkdtempSync(path.join(os.tmpdir(), 'review-collect-shim-'));
+    dirs.push(shim);
+    const log = path.join(shim, 'calls');
+    fs.writeFileSync(path.join(shim, 'git'), `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\nexec '${Bun.which('git')}' "$@"\n`, { mode: 0o755 });
+    const before = process.env.PATH;
+    process.env.PATH = `${shim}${path.delimiter}${before}`;
+    let c: ReturnType<typeof collectCommit>;
+    try { c = collectCommit(r.dir, r.baseSha, head); } finally { process.env.PATH = before; }
+    expect(c.executables).toEqual(['results/logs/prune']);
+    expect(fs.readFileSync(log, 'utf8').split('\n').filter(l => / cat-file blob /.test(` ${l}`)).length).toBe(2);
+  });
+  // Value: protects=a "#!" script under results/ stays code when the repository's git config sets grep.patternType=fixed;
+  //   fails_when=the shebang scan's git grep takes its pattern type from config again; seam=collectCommit on a fixture repo
+  test('a fixed-string grep.patternType in the repository config still finds the shebang', () => {
+    const r = repo({});
+    r.git('config', 'grep.patternType', 'fixed');
+    const head = r.commit({ 'results/t.json': '{"i":1}\n', 'results/logs/prune': '#!/bin/sh\nrm -rf "$1"\n' });
+    expect(collectCommit(r.dir, r.baseSha, head).executables).toEqual(['results/logs/prune']);
   });
 });

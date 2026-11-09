@@ -14,7 +14,8 @@ import { laneMapping, recordCiResult, type ShipLaneMapping } from './ci-carry';
 import { isConfigUnavailable, loadConfigFromBase } from './pregate/config';
 import { parseUnifiedDiff, versionAtRef } from './restamp';
 import { branchSides, stampOnlyLine } from './stamp-only';
-import { matchesAny } from './ship-policy';
+import { DEFAULT_POLICY, matchesAny } from './ship-policy';
+import { ghSpawnSync } from './gh-poll';
 import { extractVersion } from './version-source';
 import { BIN_DIR, runBashSync, runScriptSync, scriptInvocation } from './script-invocation';
 
@@ -40,7 +41,7 @@ export function hostedOrigin(cwd: string): boolean {
 }
 /** gh with argv, never a shell, so a branch name cannot change what runs. */
 export function gh(cwd: string, args: string[], timeout = 60_000): Run {
-  return done(spawnSync('gh', args, { cwd, encoding: 'utf8', timeout, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }));
+  return done(ghSpawnSync(args, { cwd, encoding: 'utf8', timeout, maxBuffer: 64 * 1024 * 1024, env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } }));
 }
 export function sh(cwd: string, command: string, timeout = 1_800_000): Run {
   return done(runBashSync(command, { cwd, encoding: 'utf8', timeout, maxBuffer: 64 * 1024 * 1024 }));
@@ -102,14 +103,16 @@ export function versionOnlyEdit(cwd: string, ref: string, p: string): boolean {
 /**
  * Release metadata a version stamp and Steps 13-14 write, compared against `ref`: the release commit's paths,
  * never a behavior change. A manifest counts only while its edit is version-only (a dependency, script or
- * lockfile change is a build input); bun.lock never counts.
+ * lockfile change is a build input); bun.lock never counts. `stampOnly` (a landed stack parent's checks, GST-1399)
+ * counts a `stamp_paths` or `release_outputs` file only while its edit is a version stamp, as `stamp_files` are.
  */
-export function releasePaths(policy: Record<string, any> | null, cwd: string, ref: string, base: string): string[] {
+export function releasePaths(policy: Record<string, any> | null, cwd: string, ref: string, base: string, stampOnly = false): string[] {
   const list = (v: unknown) => (Array.isArray(v) ? v.filter((s): s is string => typeof s === 'string') : []);
   const fragment = fragmentPath(policy, cwd);
+  const declared = [...list(policy?.release_outputs), ...list(policy?.stamp_paths)];
   return [...new Set(['VERSION', 'CHANGELOG.md', 'TODOS.md', 'agents-digest/gstack-AGENTS.md', ...VERSIONED_MANIFESTS.filter(p => versionOnlyEdit(cwd, ref, p)),
-    ...(typeof policy?.changelog === 'string' ? [policy.changelog] : []), ...(fragment ? [fragment] : []), ...list(policy?.release_outputs), ...list(policy?.stamp_paths),
-    ...stampedFiles(policy, cwd, ref, base)])];
+    ...(typeof policy?.changelog === 'string' ? [policy.changelog] : []), ...(fragment ? [fragment] : []), ...(stampOnly ? [] : declared),
+    ...stampedFiles(stampOnly ? { ...policy, stamp_files: [...list(policy?.stamp_files), ...declared] } : policy, cwd, ref, base)])];
 }
 
 /**
@@ -180,7 +183,7 @@ export function laneConcurrency(mode: string | undefined, cpus = os.availablePar
   return cpus <= 4 ? 1 : Infinity;
 }
 
-export interface LaneResult { label: string; exit: number | null; testsRan: string; log: string; carried?: string; reused?: string; carryNone?: string; notOwed?: string; here?: string }
+export interface LaneResult { label: string; exit: number | null; testsRan: string; log: string; carried?: string; reused?: string; carryNone?: string; diagnosis?: string[]; notOwed?: string; here?: string; exception?: string; remoteGate?: string; standIn?: string }
 
 /** The base branch's `ship_lanes_from` entry for each lane whose command is a key or a declared alias, byte for byte (the ledger binds its sha256). */
 export function mappedLanes(cwd: string, base: string, list: { label: string; command: string }[]): Map<string, ShipLaneMapping> {
@@ -194,13 +197,23 @@ export function mappedLanes(cwd: string, base: string, list: { label: string; co
 
 /**
  * A mapped lane carried from CI at HEAD's clean tree: gstack-evidence record-ci finds and verifies the run (lib/ci-carry.ts)
- * and records the CI-sourced ledger row; or why it was not (`carryNone`), so the caller runs it.
+ * and records the CI-sourced ledger row; or, when the lane's inventory refuses this tree, the cleared remote gate for this exact
+ * tree stands in (`remoteGate`, lib/remote-gate-stand-in.ts, GST-1688); or why neither held (`carryNone`), so the caller runs it.
  */
-export function carryLane(cwd: string, base: string, l: { label: string; command: string }): LaneResult {
-  const rec = bin(cwd, 'gstack-evidence', ['record-ci', '--label', l.label, '--base', base, '--', l.command], 600_000);
+export function carryLane(cwd: string, base: string, l: { label: string; command: string }, timeoutS = DEFAULT_POLICY.ci_record_timeout_s): LaneResult {
+  const rec = bin(cwd, 'gstack-evidence', ['record-ci', '--label', l.label, '--base', base, '--remote-gate-stands-in', '--', l.command], timeoutS * 1000);
   const got = recordCiResult(rec.stderr);
-  if (rec.status === 0 && got.runs) return { label: l.label, exit: 0, testsRan: got.files ? `${got.tests} (files)` : got.tests!, log: '-', carried: got.runs, ...(got.notOwed ? { notOwed: got.notOwed } : {}), ...(got.here ? { here: got.here } : {}) };
-  return { label: l.label, exit: null, testsRan: 'unknown', log: '-', carryNone: got.none ?? `record_failed: ${firstLine(rec.stderr)}` };
+  if (rec.status === 0 && got.remoteGate) return { label: l.label, exit: 0, testsRan: got.tests!, log: '-', remoteGate: got.remoteGate, standIn: got.standIn ?? 'not carried' };
+  if (rec.status === 0 && got.runs) return { label: l.label, exit: 0, testsRan: got.files ? `${got.tests} (files)` : got.tests!, log: '-', carried: got.runs, ...(got.notOwed ? { notOwed: got.notOwed } : {}), ...(got.here ? { here: got.here } : {}), ...(got.exception ? { exception: got.exception } : {}), ...(got.reused ? { reused: got.reused } : {}) };
+  return { label: l.label, exit: null, testsRan: 'unknown', log: '-', carryNone: got.none ?? `record_failed: ${firstLine(rec.stderr)}`, ...(got.diagnosis ? { diagnosis: got.diagnosis } : {}) };
+}
+
+/** accept's bound on one record-ci (GST-1606): the base policy's `ci_record_timeout_s`, 600 s by default, clamped to 3600 s. */
+export function recordCiTimeout(policy: Record<string, any> | null, base: string): { seconds: number; line: string } {
+  const set = policy?.ci_record_timeout_s;
+  if (typeof set !== 'number' || set === DEFAULT_POLICY.ci_record_timeout_s) return { seconds: DEFAULT_POLICY.ci_record_timeout_s, line: `CI_RECORD_TIMEOUT: ${DEFAULT_POLICY.ci_record_timeout_s}s (default)` };
+  if (set > 3600) return { seconds: 3600, line: `CI_RECORD_TIMEOUT: 3600s (origin/${base} ci_record_timeout_s ${set} is over the 3600s ceiling)` };
+  return { seconds: set, line: `CI_RECORD_TIMEOUT: ${set}s (origin/${base} ci_record_timeout_s)` };
 }
 
 /**
@@ -218,7 +231,7 @@ export async function runLanes(cwd: string, list: { label: string; command: stri
       const l = list[i]!;
       const m = mapped.get(l.label);
       const carry = m ? carryLane(cwd, opts.base!, l) : null;
-      if (carry?.carried) { out[i] = carry; continue; }
+      if (carry?.carried || carry?.remoteGate) { out[i] = carry; continue; }
       const r = await binAsync(cwd, 'gstack-evidence', ['run', ...(opts.reuse === false ? [] : ['--reuse']), '--label', l.label, '--', l.command]);
       const rec = /gstack-evidence: recorded label=\S+ exit=(\S+) tests_ran=(\S+) log=(\S+)/.exec(r.stderr);
       const reused = /gstack-evidence: reused label=\S+ tree=\S+ from=(\S+)/.exec(r.stderr)?.[1];
@@ -232,11 +245,15 @@ export async function runLanes(cwd: string, list: { label: string; command: stri
 /** Step 5's lane verdict: a lane passes on its runner count, never exit 0 alone; a carried lane names its CI runs. */
 export function laneLine(l: LaneResult): { line: string; ok: boolean } {
   if (l.notOwed) return { line: `LANE: ${l.label} not owed: ${l.notOwed} run=${l.carried}`, ok: true };
-  if (l.carried) return { line: `LANE: ${l.label} carried run=${l.carried} tests_ran=${l.testsRan}${l.here ? ` ${l.here}` : ''}`, ok: true };
+  if (l.carried) return { line: `LANE: ${l.label} carried run=${l.carried} tests_ran=${l.testsRan}${l.here ? ` ${l.here}` : ''}${l.reused ? ` (reused the CI record at tree ${l.reused})` : ''}`, ok: true };
+  if (l.remoteGate) return { line: `LANE: ${l.label} satisfied by remote_gate receipt=${l.remoteGate}`, ok: true };
   const zero = l.exit === 0 && l.testsRan === '0';
   const state = l.exit !== 0 ? 'FAIL' : zero ? 'ZERO-RUN' : l.testsRan === 'unknown' ? 'pass (count unavailable)' : 'pass';
   return { line: `LANE: ${l.label} ${state} exit=${l.exit} tests_ran=${l.testsRan} log=${l.log}${l.reused ? ` reused=${l.reused}` : ''}`, ok: l.exit === 0 && !zero };
 }
 
-/** The CI_CARRY line for a mapped lane that ran here instead. */
-export const carryNoneLine = (l: LaneResult) => (l.carryNone ? `CI_CARRY: none label=${l.label} (${l.carryNone.length > 220 ? `${l.carryNone.slice(0, 220)}…` : l.carryNone})` : null);
+/**
+ * The CI_CARRY line for a mapped lane that ran here instead, then a CARRY_DIAGNOSIS line per uncovered file another test file imports
+ * (or why no remote gate stood in); for a lane the cleared remote gate stood in for, the line that names the substitution.
+ */
+export const carryNoneLines = (l: LaneResult): string[] => l.remoteGate ? [`CI_CARRY: remote_gate label=${l.label} receipt=${l.remoteGate} (${(l.standIn ?? '').length > 160 ? `${l.standIn!.slice(0, 160)}…` : l.standIn}; the cleared pregate.json/remote_gate for this exact tree stands in)`] : (l.carryNone ? [`CI_CARRY: none label=${l.label} (${l.carryNone.length > 220 ? `${l.carryNone.slice(0, 220)}…` : l.carryNone})`, ...(l.diagnosis ?? []).map(d => `CARRY_DIAGNOSIS: ${d}`)] : []);

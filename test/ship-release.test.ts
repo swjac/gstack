@@ -172,6 +172,26 @@ describe('finish (Steps 15-16)', () => {
     expect(f.git('ls-remote', '--heads', 'origin', 'feat').stdout).toBe('');
   });
 
+  // Value: protects=finish --plan resolves the brief's Plan line before any stage: require + Plan: required stops with no commit; a resolvable line prints PLAN: first; fails_when=finishPlan runs after the stages, its stop is dropped, or the line is not first; why_new=plan-record.test.ts covers the helper only; seam=none; no_claim=approved-row resolution (exempt line used)
+  test('finish --plan: under GSTACK_PLAN_RECORD=require "Plan: required" stops before any stage; a resolvable line under warn prints PLAN: first', () => {
+    const f = fx();
+    const reviewed = wtree(f);
+    expect(f.run(RELEASE, ['version', '--base', 'main', '--bump', 'micro']).status).toBe(0);
+    const post = snapshot(f);
+    const args = ['finish', '--base', 'main', '--reviewed-tree', reviewed, '--docs-post', post, '--lane', LANE];
+    const head = f.git('rev-parse', 'HEAD').stdout.trim();
+    const stop = f.run(RELEASE, [...args, '--plan', 'Plan: required'], { GSTACK_PLAN_RECORD: 'require' });
+    expect(stop.status).toBe(3);
+    expect(stop.stdout).toMatch(/^PLAN: refused .*\(PLAN_NOT_APPROVED\)/m);
+    expect(stop.stdout).toMatch(/^STOP: .*\(PLAN_NOT_APPROVED\); fix: /m);
+    expect(stop.stdout).not.toContain('COMMIT:');
+    expect(f.git('rev-parse', 'HEAD').stdout.trim()).toBe(head);
+    const ok = f.run(RELEASE, [...args, '--plan', 'exempt: bug fix'], { GSTACK_PLAN_RECORD: 'warn' });
+    expect(ok.stdout.split('\n')[0]).toBe('PLAN: exempt bug fix');
+    expect(ok.stdout).toMatch(/^COMMIT: /m);
+    expect(ok.status).toBe(0);
+  });
+
   // Value: protects=under changelog_fragments the branch's own fragment is release metadata: version writes nothing and names it in NEXT, finish commits it as the release commit and the route counts it as metadata, and another fragment is still a feature file; fails_when=finish stops on changelog.d/<slug>.md or routes it to re-review (/ship #3648 fix-check 4, CRITICAL);
   //   why_new=releasePaths predates changelog_fragments (#3654); seam=gstack-ship-policy show-effective, gstack-wtree; no_claim=the merge step's fold
   test('under changelog_fragments the branch fragment is release metadata and Step 12 names it', () => {
@@ -290,6 +310,23 @@ describe('push (Step 17)', () => {
     expect(r.status).toBe(3);
     expect(r.stdout).toContain('STOP: non-fast-forward');
     expect(r.stdout).toContain('never force-push');
+  });
+
+  // Value: protects=a never-pushed branch whose name breaks the repo's plain-words policy stops before the push, and a plain name pushes; fails_when=a coded or jargon branch name reaches origin, or a plain one is refused;
+  //   why_new=plain public record (docs/ship-policy.md#plain-titles); seam=.gstack/plain-titles.json, git ls-remote; no_claim=branches already on origin
+  test('a never-pushed branch name with a tracker code or coined term in its front stops; a plain name pushes', () => {
+    const f = fx();
+    f.write({ '.gstack/plain-titles.json': JSON.stringify({ codes: ['\\bGST-\\d+\\b'], terms: ['pregate'], allow: [], since: '2026-11-08', exempt_branch_prefixes: ['release/'] }) });
+    f.commit('policy');
+    f.git('branch', '-m', 'gst-1825-pregate-fix');
+    const r = f.run(RELEASE, ['push', '--branch', 'gst-1825-pregate-fix'], { GSTACK_SESSION_KIND: 'unattended' });
+    expect(r.status, r.stdout + r.stderr).toBe(3);
+    expect(lineOf(r.stdout, 'BRANCH')).toContain('BRANCH: refused');
+    expect(r.stdout).toContain('is not plain words');
+    f.git('branch', '-m', 'faster-checks-gst-1825');
+    const ok = f.run(RELEASE, ['push', '--branch', 'faster-checks-gst-1825'], { GSTACK_SESSION_KIND: 'unattended' });
+    expect(ok.status, ok.stdout + ok.stderr).toBe(0);
+    expect(lineOf(ok.stdout, 'PUSH')).toMatch(/^PUSH: pushed [0-9a-f]{12} to origin\/faster-checks-gst-1825$/);
   });
 });
 

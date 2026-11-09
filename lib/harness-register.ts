@@ -19,6 +19,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { unregisteredSkills } from '../scripts/discover-skills';
 import { bunIsolationArgs } from './bun-isolation';
 import { runBashSync } from './script-invocation';
 import { frontmatterList, routerLine } from './skill-triggers';
@@ -37,7 +38,7 @@ export const BLOCK_END = '<!-- gstack:end harness-routing -->';
 export const DOT_SKILLS_DIR = '/home/dot/skills';
 export const ROUTER_DESCRIPTION = 'Use to review a diff or PR, debug a bug or failing test, QA test a site, plan or review architecture, ship a PR, audit security or write release docs. Load first for any coding task: lists every gstack skill and where to read it.';
 /** OpenClaw hybrid mode: these task skills are listed as skills of their own; the router carries the rest. */
-export const HYBRID_SKILLS = ['review', 'investigate', 'qa', 'ship', 'plan-eng-review'];
+export const HYBRID_SKILLS = ['review', 'qa', 'ship'];
 /**
  * OpenClaw serves a registered skill's SKILL.md whole or refuses it ("Skill instructions cannot be partially
  * served"), with maxBytes from resolveAdaptiveReadMaxBytes: 32,768 (DEFAULT_READ_PAGE_MAX_BYTES) when the model's
@@ -233,13 +234,15 @@ function skillDirs(root: string, triggersByName = new Map<string, string[]>()): 
 
 /** The skills a target's payload carries: the host render (made for this checkout as the install root) or the checkout's committed Claude render. */
 export function sourceSkills(target: Target, checkout: string, scratch: string): SkillEntry[] {
-  if (target.render === 'claude') return skillDirs(checkout).filter(s => s.name !== 'gstack');
+  const off = unregisteredSkills();
+  const registered = (s: SkillEntry) => !off.includes(s.name.replace(/^gstack-/, ''));
+  if (target.render === 'claude') return skillDirs(checkout).filter(s => s.name !== 'gstack' && registered(s));
   const out = path.join(scratch, 'render');
   fs.rmSync(out, { recursive: true, force: true });
   const r = spawnSync(process.execPath, [...bunIsolationArgs(), 'scripts/gen-skill-docs.ts', '--host', target.name, '--install-root', checkout, '--out-dir', out],
     { cwd: checkout, encoding: 'utf8', timeout: 300_000 });
   if (r.status !== 0) throw new HarnessError('HARNESS_RENDER_FAILED', 'could not render ' + target.name + ' skills: ' + ((r.stderr || r.stdout || '').trim().split('\n').slice(-3).join(' | ')));
-  const skills = skillDirs(path.join(out, '.' + target.name, 'skills'), new Map(skillDirs(checkout).map(s => [s.name, s.triggers])));
+  const skills = skillDirs(path.join(out, '.' + target.name, 'skills'), new Map(skillDirs(checkout).map(s => [s.name, s.triggers]))).filter(registered);
   if (!skills.length) throw new HarnessError('HARNESS_RENDER_FAILED', 'the ' + target.name + ' render produced no skills');
   return skills;
 }

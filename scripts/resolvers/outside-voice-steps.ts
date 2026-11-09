@@ -14,7 +14,7 @@
  */
 import { toShellPath, type TemplateContext } from './types';
 import { CC_BACKGROUND_DEFAULT_SINCE, FOREGROUND_IF_AVAILABLE, BACKGROUND_RECOVERY } from './constants';
-import { outsideVoiceFailurePolicy, outsideVoiceFor, outsideVoiceInvocation, outsideVoicePreflight, outsideVoiceProvenance } from './outside-voice';
+import { outsideVoiceFailurePolicy, outsideVoiceFor, outsideVoiceInvocation, outsideVoicePreflight, outsideVoiceProvenance, OUTSIDE_VERDICT_REQUEST } from './outside-voice';
 import { runtimeRootPrelude } from './runtime-root';
 import { DEFENSIVE_REVIEW_FRAMING, fixtureSummaryMode } from './defensive-review';
 import { BLOCKING_FLOOR } from '../../lib/review-scope';
@@ -144,15 +144,15 @@ If the subagent fails or times out, record native coverage as incomplete. Contin
 }
 
 function adversarialOutsideChallenge(ctx: TemplateContext, isShip: boolean): string {
-  return `### ${outsideVoiceFor(ctx).label} adversarial challenge (runs whenever \`CODEX_MODE\` is \`ready\` or \`unverified\`)
+  return `### ${outsideVoiceFor(ctx).label} adversarial challenge (${isShip ? 'on \`DISPATCH: outside-voice\`, when' : 'runs whenever'} \`CODEX_MODE\` is \`ready\` or \`unverified\`)
 
-If \`CODEX_MODE\` is \`ready\` or \`unverified\`:
+${isShip ? 'On \`DISPATCH: outside-voice\`, if' : 'If'} \`CODEX_MODE\` is \`ready\` or \`unverified\`:
 
 Outside prompt (supply repository context from the parent):
 
-"${CODEX_BOUNDARY}Review the changes on this branch against the base branch. Use the supplied branch diff. If it was not supplied and you have repository tools, run DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE". Your job is to find ways this code will fail in production. Think like an attacker and a chaos engineer. Find edge cases, race conditions, security holes, resource leaks, failure modes, and silent data corruption paths. Be adversarial. Be thorough. No compliments — just the problems. A finding blocks only if it ${BLOCKING_FLOOR}; end each finding with \`Severity: Critical|High|Medium|Low\` and \`Blocks: yes|no\`. End your output with ONE line in the canonical format \`Recommendation: <action> because <one-line reason naming the most exploitable finding>\`. Generic reasons like 'because it's safer' do not qualify; the reason must point to a specific finding or no-fix rationale."
+"${CODEX_BOUNDARY}Review the changes on this branch against the base branch. Use the supplied branch diff. If it was not supplied and you have repository tools, run DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE". Your job is to find ways this code will fail in production. Think like an attacker and a chaos engineer. Find edge cases, race conditions, security holes, resource leaks, failure modes, and silent data corruption paths. Be adversarial. Be thorough. No compliments — just the problems. A finding blocks only if it ${BLOCKING_FLOOR}; end each finding with \`Severity: Critical|High|Medium|Low\` and \`Blocks: yes|no\`. Then write ONE line in the canonical format \`Recommendation: <action> because <one-line reason naming the most exploitable finding>\`. Generic reasons like 'because it's safer' do not qualify; the reason must point to a specific finding or no-fix rationale. ${OUTSIDE_VERDICT_REQUEST}"
 
-${outsideVoiceInvocation(ctx, { timeoutMs: 540000, nativeAlreadyRequired: true, diffCommand: 'DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"' })}
+${outsideVoiceInvocation(ctx, { timeoutMs: 540000, nativeAlreadyRequired: isShip ? 'dispatched' : true, diffCommand: 'DIFF_BASE=$(git merge-base origin/<base> HEAD) && git diff "$DIFF_BASE"' })}
 
 Present the full output verbatim. A Critical, High or \`Blocks: yes\` finding is CRITICAL; \`Blocks: no\` never lowers one, and only a named policy ground drops it. ${isShip ? 'An unavailable outside challenge does not block shipping by itself; supported findings still enter Step 11, and the structured P0/P1 and non-convergence gates still apply.' : 'This outside challenge is informational; supported findings still enter Step 5 Fix-First, whose approval and convergence gates apply.'}
 
@@ -161,24 +161,20 @@ ${outsideVoiceFailurePolicy(ctx, { timeoutMinutes: 9, onTimeout: 'missing-covera
 
 
 
-For other modes, retain the native pass above; do not dispatch it again.
+${isShip ? 'Other modes skip it; the native pass follows its own DISPATCH line.' : 'For other modes, retain the native pass above; do not dispatch it again.'}
 
 ---`;
 }
 
 function adversarialStructuredReview(ctx: TemplateContext, isShip: boolean): string {
-  return `### ${outsideVoiceFor(ctx).label} structured review (large diffs only, 200+ lines)
+  return `### ${outsideVoiceFor(ctx).label} structured review (${isShip ? 'on \`DISPATCH: outside-voice\`, 200+ lines' : 'large diffs only, 200+ lines'})
 
-If \`CODEX_MODE\` is \`ready\` or \`unverified\` and either \`DIFF_TOTAL >= 200\` or the user requested the override above:
+${isShip ? 'On \`DISPATCH: outside-voice\`, if' : 'If'} \`CODEX_MODE\` is \`ready\` or \`unverified\` and either \`DIFF_TOTAL >= 200\` or the user requested the override above:
 
-Prepare a structured review prompt requesting severity-tagged findings ([P0]-[P3]) or an explicit NO_FINDINGS conclusion. Preserve the base-branch scope including committed changes and working-tree changes.
+${outsideVoiceInvocation(ctx, { timeoutMs: 540000, nativeAlreadyRequired: isShip ? 'dispatched' : true, gate: 'structured', diffCommand: 'DIFF_BASE=$(git merge-base <base> HEAD) && git diff "$DIFF_BASE"' })}
 
-${outsideVoiceInvocation(ctx, { timeoutMs: 540000, nativeAlreadyRequired: true, structuredBase: '<base>', gate: 'structured', diffCommand: 'DIFF_BASE=$(git merge-base <base> HEAD) && git diff "$DIFF_BASE"' })}
-
-${outsideVoiceFor(ctx).id === 'codex' ? 'The Codex backend uses `codex review --base` without a positional prompt: those arguments are mutually exclusive. Never drop --base to resolve an argv error; prompt-only review changes the diff scope.' : `The ${outsideVoiceFor(ctx).label} backend receives the parent-captured base diff, including committed and working-tree changes, because ${outsideVoiceFor(ctx).id === 'gemini' ? 'Gemini' : 'review mode'} cannot execute git.`}
-
-Present output under \`${outsideVoiceFor(ctx).label.toUpperCase()} SAYS (code review):\` inside a \`tool-output\` fence.
-Only a completed response with severity tags or an explicit no-findings conclusion establishes the gate. P0/P1 findings (\`[P0]\`/\`[P1]\` or native \`P0:\`/\`P1:\` labels; \`VERDICT: findings\`) → GATE: FAIL. Completed without P0/P1 → GATE: PASS. Refusal, failure, missing markers or \`OUTSIDE_STATUS: unverified\` → GATE: MISSING COVERAGE; no fix question.
+${outsideVoiceFor(ctx).id === 'codex' ? '' : `The ${outsideVoiceFor(ctx).label} backend receives the parent-captured base diff, including committed and working-tree changes, because ${outsideVoiceFor(ctx).id === 'gemini' ? 'Gemini' : 'review mode'} cannot execute git.\n\n`}Present output under \`${outsideVoiceFor(ctx).label.toUpperCase()} SAYS (code review):\` inside a \`tool-output\` fence.
+Only a completed response ending with its \`VERDICT:\` line establishes the gate. P0/P1 findings (\`[P0]\`/\`[P1]\` or native \`P0:\`/\`P1:\` labels; \`VERDICT: findings\`) → GATE: FAIL. Completed without P0/P1 → GATE: PASS. Refusal, failure, missing markers or \`OUTSIDE_STATUS: unverified\` → GATE: MISSING COVERAGE; no fix question.
 
 If GATE is FAIL, use AskUserQuestion:
 \`\`\`
@@ -195,7 +191,7 @@ Read stderr for errors (same error handling as ${outsideVoiceFor(ctx).label} adv
 
 
 
-If \`DIFF_TOTAL < 200\` without that override, skip structured review; the adversarial passes still run.
+If \`DIFF_TOTAL < 200\` without that override, skip structured review; the ${isShip ? 'dispatched ' : ''}adversarial passes still run.
 
 ---`;
 }
@@ -250,13 +246,13 @@ echo "DIFF_SIZE: $DIFF_TOTAL"
 
 **Detect the ${outsideVoiceFor(ctx).label} master switch + tool availability:**
 
-${outsideVoicePreflight(ctx, { disabledBehavior: 'codex-only', nativeReview: true })}
+${outsideVoicePreflight(ctx, { disabledBehavior: 'codex-only', nativeReview: true, nativeDispatched: isShip })}
 
 \`CODEX_MODE: disabled\` means skip the ${outsideVoiceFor(ctx).label} passes ONLY.
-\`ready\` and \`unverified\` run them; every other mode skips them with the printed reason.${isShip ? '' : `
+\`ready\` and \`unverified\` run them${isShip ? ' on \`DISPATCH: outside-voice\`' : ''}; every other mode skips them with the printed reason.${isShip ? '' : `
 The ${outsideVoiceFor(ctx).nativeLabel} adversarial subagent always runs.`}
 
-**User override:** If the user explicitly requested "full review", "structured review", or "P1 gate", also run the ${outsideVoiceFor(ctx).label} structured review regardless of diff size (still requires \`CODEX_MODE: ready\` (or \`unverified\`)).
+**User override:** If the user explicitly requested "full review", "structured review", or "P1 gate", also run the ${outsideVoiceFor(ctx).label} structured review regardless of diff size (still requires ${isShip ? '\`DISPATCH: outside-voice\` and ' : ''}\`CODEX_MODE: ready\` (or \`unverified\`)).
 
 ---
 
@@ -309,7 +305,7 @@ in order before leaving Step 11:
    Otherwise insert Steps 9, 10 and 11 before the pending Step 11.5 in the work list.
    Step 9 completes full review before fixes; any further repair inserts its checks
    ahead of the remaining items. These fresh reviews after code edits are not recovery retries.
-   Returning here never resets Step 9's three-cycle fix limit.
+   Returning here never resets Step 9's three-cycle fix limit (under \`frozen\`, the plan's cap).
 3. **Native complete with no queued fixes, or not dispatched:** Finish the memory updates below,
    then continue to Step 11.5. Never jump directly to release preparation.` : 'The native pass is required for Step 5.8 completion. Optional outside failures remain separately recorded, not completed by native coverage. Return all findings and structured-review decisions to Step 5; the parent owns fixes and the full rerun.'}
 
@@ -389,7 +385,7 @@ survived the review scrutiny, overcomplexity (is there a fundamentally simpler
 approach the review was too deep in the weeds to see?), feasibility risks the review
 took for granted, missing dependencies or sequencing issues, and strategic
 miscalibration (is this the right thing to build at all?). Be direct. Be terse. No
-compliments. Just the problems.${needsApprovalReadiness ? '\n\nEnd with Recommendation: <action> because <specific reason>. If there are no findings, say so and explain why the plan is ready.\n' : ''}
+compliments. Just the problems.${needsApprovalReadiness ? '\n\nWrite Recommendation: <action> because <specific reason>; if no findings, explain why the plan is ready. ' + OUTSIDE_VERDICT_REQUEST + '\n' : ''}
 ${ctx.skillName === 'plan-devex-review' ? `
 REVIEW CONTEXT (from the full working list, outside the truncated plan body):
 <requested DX mode and explicit boundaries>

@@ -5,8 +5,11 @@
  * Usage (run inside the repository):
  *   gstack-docs-candidate snapshot --out <candidate.json> --audit-id <id> --mode edit|read-only
  *                                  --base <rev> [--select <path>]... [--docs <path>[,<path>...]]... [--exception <docs-audit.json>]
+ *                                  [--run <id>] [--pre <prepare.json> [--carry <earlier-post.json>]]
  *   gstack-docs-candidate compare <candidate.json>
  *   gstack-docs-candidate attempt <child-output> --state <attempts.json>
+ *   gstack-docs-candidate result <child-output> --audit-id <id> --out-dir <record dir> [--repair-of <first child-output>]
+ *   gstack-docs-candidate repair-prompt <child-output> --audit-id <id>
  *   gstack-docs-candidate [snapshot|compare] --help
  *
  * snapshot saves, NUL-safely and without writing to the repository: base SHA,
@@ -24,6 +27,15 @@
  * Step 16 can tell an accepted risk from a skipped audit. A --base that is HEAD
  * or already contains it while the branch has commits its real base lacks is
  * refused (BASE_CONTAINS_HEAD, lib/default-base.ts): it would select nothing.
+ * --run names the /ship invocation (its record's path) and is saved as run_id.
+ * --pre <Prepare snapshot> marks a post snapshot: it must be this audit's
+ * (same audit id, HEAD and run) and the record saves `edited`, each path whose
+ * content the audit changed with its content before (the Prepare hash, else
+ * HEAD's blob, null when absent) and after. --carry <an earlier audit's post
+ * snapshot> (with --pre and --run) saves that audit and the ones it carried as
+ * `earlier`, so receipt write resets every file this run's audits edited
+ * (GST-1616); a snapshot of another run, one without `edited`, or one whose
+ * HEAD is not an ancestor of HEAD is refused.
  *
  * compare re-reads the same state and prints one JSON object: whether HEAD or
  * the index changed, which recorded paths' content changed or disappeared, and
@@ -36,6 +48,17 @@
  * refusal, and no audit JSON) never audited, so it is not counted, once per
  * invocation (--state, the invocation's record); a second refusal is counted
  * and stops for the install fix (GST-391, gbrain #8084).
+ *
+ * result checks the child's last nonempty line against Step 14.5's JSON contract
+ * (lib/ship-docs-result.ts), trimming whitespace around keys. On success it saves
+ * <audit-id>-result.json and the section, unchanged, as <audit-id>-documentation.md
+ * in --out-dir and prints DOCS_RESULT: ok. Otherwise it writes nothing, prints a
+ * DOCS_RESULT_INVALID line naming each bad key and a RETRY_NOTE: for the re-audit's
+ * prompt, and exits 1 (GST-1843). When the line's only fault is its shape it prints
+ * FORMAT_REPAIR: instead of RETRY_NOTE:, and the step re-asks for the line once without
+ * spending an attempt: repair-prompt prints that re-ask (the schema, the problems and the
+ * child's own output), and result --repair-of <first output> checks the reply, refusing a
+ * second repair of the same audit and any change to a value the first line gave correctly.
  */
 import { spawnSync } from 'child_process';
 import * as fs from 'fs';
@@ -43,6 +66,7 @@ import * as path from 'path';
 import { baseContainsHead } from '../lib/default-base';
 import { baseArg } from '../lib/gate-diff/git';
 import { resultLine } from '../lib/result-codes';
+import { checkDocsRepair, checkDocsResult, docsRepairPrompt, docsRetryNote, type DocsResultCheck } from '../lib/ship-docs-result';
 import { parseReceiptDocs, type ReceiptDocs } from '../lib/ship-receipt-docs';
 
 function git(args: string[]): string {
@@ -118,9 +142,17 @@ function one(args: string[], name: string): string {
   return values[0]!;
 }
 
-const USAGE = `usage: gstack-docs-candidate snapshot --out <candidate.json> --audit-id <id> --mode edit|read-only --base <rev> [--select <path>]... [--docs <path>[,<path>...]]... [--exception <docs-audit.json>]
+const USAGE = `usage: gstack-docs-candidate snapshot --out <candidate.json> --audit-id <id> --mode edit|read-only --base <rev> [--select <path>]... [--docs <path>[,<path>...]]... [--exception <docs-audit.json>] [--run <id>] [--pre <prepare.json> [--carry <earlier-post.json>]]
        gstack-docs-candidate compare <candidate.json>
-       gstack-docs-candidate attempt <child-output> --state <attempts.json>`;
+       gstack-docs-candidate attempt <child-output> --state <attempts.json>
+       gstack-docs-candidate result <child-output> --audit-id <id> --out-dir <record dir> [--repair-of <first child-output>]
+       gstack-docs-candidate repair-prompt <child-output> --audit-id <id>`;
+
+function auditIdArg(args: string[]): string {
+  const auditId = one(args, '--audit-id');
+  if (!/^[A-Za-z0-9._-]+$/.test(auditId) || auditId.includes('..')) throw new Error(`--audit-id ${JSON.stringify(auditId)} must be letters, digits, dot, underscore or dash, with no '..'`);
+  return auditId;
+}
 
 /** The owner's accepted Step 14.5 exception from the blocked .gstack/tmp/docs-audit.json record, read by the receipt's own parser; throws when the record is not blocked or names no complete exception. */
 function acceptedException(file: string): NonNullable<ReceiptDocs['exception']> & { scope: string } {
@@ -130,6 +162,47 @@ function acceptedException(file: string): NonNullable<ReceiptDocs['exception']> 
   const problem = !parsed.ok ? parsed.message : parsed.docs.status !== 'blocked' ? `its status is ${parsed.docs.status}, not blocked` : !parsed.docs.exception ? 'it names no accepted exception' : null;
   if (problem || !parsed.ok || !parsed.docs.exception) throw new Error(`--exception ${file}: ${problem}. Only an owner-accepted documentation risk writes this snapshot (ship/sections/documentation.md, Blocked recovery step 3)`);
   return { ...parsed.docs.exception, scope: parsed.docs.scope };
+}
+
+/** One value for an optional flag given at most once. */
+function optional(args: string[], name: string): string | undefined {
+  const values = flag(args, name);
+  if (values.length > 1) throw new Error(`${name} is allowed once`);
+  if (values[0] !== undefined && (!values[0].trim() || /[\x00-\x1f\x7f]/.test(values[0]))) throw new Error(`${name} must be a non-empty one-line value`);
+  return values[0];
+}
+
+function readRecord(file: string, name: string): Record<string, any> {
+  let record: unknown;
+  try { record = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (error) { throw new Error(`${name} ${file} is not readable JSON: ${(error as Error).message.split('\n')[0]}`); }
+  if (!record || typeof record !== 'object' || Array.isArray(record) || typeof (record as any).head !== 'string' || !(record as any).hashes || typeof (record as any).hashes !== 'object') throw new Error(`${name} ${file} is not a gstack-docs-candidate snapshot`);
+  return record as Record<string, any>;
+}
+
+type Edited = Record<string, { before: string | null; after: string | null }>;
+
+/** The post snapshot's own audit: each path whose content differs from this audit's Prepare snapshot, before (its Prepare hash, else HEAD's blob) and after. */
+function auditEdits(pre: Record<string, any>, file: string, post: { audit_id: string; run_id?: string; head: string; hashes: Record<string, string | null> }): { edited: Edited } {
+  if (pre.audit_id !== post.audit_id || pre.head !== post.head || pre.run_id !== post.run_id) throw new Error(`--pre ${file} is not this audit's Prepare snapshot (its audit id, HEAD or run differs)`);
+  const paths = [...new Set([...Object.keys(pre.hashes), ...Object.keys(post.hashes)])].sort();
+  const now = hashes(paths.filter(p => !(p in post.hashes)));
+  const blob = (p: string) => spawnSync('git', ['rev-parse', '--verify', '--quiet', `${pre.head}:${p}`], { encoding: 'utf8', timeout: 60_000 }).stdout?.trim() || null;
+  const edited: Edited = {};
+  for (const p of paths) {
+    const before = p in pre.hashes ? pre.hashes[p] : blob(p);
+    const after = p in post.hashes ? post.hashes[p]! : now[p]!;
+    if (before !== after) edited[p] = { before, after };
+  }
+  return { edited };
+}
+
+/** An earlier audit of this run and the audits it carried, oldest first; refuses another run's snapshot, one without `edited` and one whose HEAD is not an ancestor of HEAD. */
+function carried(prior: Record<string, any>, file: string, post: { audit_id: string; run_id?: string; head: string }): Array<{ run_id: string; audit_id: string; head: string; edited: Edited }> {
+  if (prior.run_id !== post.run_id) throw new Error(`--carry ${file} is audit ${prior.audit_id} of another /ship run (${prior.run_id ?? 'no --run'}), not ${post.run_id}: a post snapshot carries only this run's earlier audits`);
+  if (!prior.edited || typeof prior.edited !== 'object' || Array.isArray(prior.edited)) throw new Error(`--carry ${file} names no edited files: take each post snapshot with --pre <its Prepare snapshot>`);
+  if (prior.audit_id === post.audit_id) throw new Error(`--carry ${file} is this audit (${post.audit_id}), not an earlier one`);
+  if (spawnSync('git', ['merge-base', '--is-ancestor', String(prior.head), post.head], { timeout: 60_000 }).status !== 0) throw new Error(`--carry ${file}: its HEAD ${String(prior.head).slice(0, 12)} is not an ancestor of HEAD`);
+  return [...(Array.isArray(prior.earlier) ? prior.earlier : []), { run_id: prior.run_id, audit_id: prior.audit_id, head: prior.head, edited: prior.edited }];
 }
 
 /** Each field compare needs that the record lacks or types wrongly; empty for a valid record. */
@@ -145,13 +218,13 @@ function recordProblems(record: any): string[] {
 function main(argv: string[]): void {
   const [command, ...args] = argv;
   const topHelp = (command === '--help' || command === '-h') && !args.length;
-  const commandHelp = (command === 'snapshot' || command === 'compare' || command === 'attempt') && args.length === 1 && args[0] === '--help';
+  const commandHelp = (command === 'snapshot' || command === 'compare' || command === 'attempt' || command === 'result' || command === 'repair-prompt') && args.length === 1 && args[0] === '--help';
   if (topHelp || commandHelp) {
     console.log(USAGE);
     return;
   }
   if (command === 'snapshot') {
-    const known = new Set(['--out', '--audit-id', '--mode', '--base', '--select', '--docs', '--exception']);
+    const known = new Set(['--out', '--audit-id', '--mode', '--base', '--select', '--docs', '--exception', '--run', '--pre', '--carry']);
     for (let i = 0; i < args.length; i += 2) if (!known.has(args[i]!)) throw new Error(`unknown argument: ${args[i]}`);
     const out = path.resolve(one(args, '--out'));
     const top = fs.realpathSync(git(['rev-parse', '--show-toplevel']).trim());
@@ -163,6 +236,7 @@ function main(argv: string[]): void {
     if (self) throw new Error(resultLine('snapshot', 'BASE_CONTAINS_HEAD', self));
     const exceptionFile = flag(args, '--exception')[0];
     const exception = exceptionFile === undefined ? undefined : acceptedException(exceptionFile);
+    const [preFile, carryFile] = ['--pre', '--carry'].map(name => { const v = optional(args, name); return v === undefined ? undefined : path.resolve(v); });
     process.chdir(top);
     const now = state(base);
     const listed = nul(git(['ls-files', '-z', '--cached', '--others', '--exclude-standard']));
@@ -170,11 +244,18 @@ function main(argv: string[]): void {
       : [...new Set([...now.committed, ...now.staged, ...now.unstaged, ...now.untracked])].sort();
     const docs = expand(listed, docsPaths(listed, flag(args, '--docs')));
     const tracked = [...new Set([...selected, ...docs, ...now.staged, ...now.unstaged, ...now.untracked])].sort();
-    const record = { schema_version: 1, audit_id: one(args, '--audit-id'), mode, base, ...now, selected, docs, hashes: hashes(tracked), ...(exception ? { exception } : {}) };
-    fs.writeFileSync(out, JSON.stringify(record, null, 2) + '\n', { mode: 0o600 });
+    const auditId = one(args, '--audit-id');
+    const run = optional(args, '--run');
+    const record = { schema_version: 1, audit_id: auditId, ...(run === undefined ? {} : { run_id: run }), mode, base, ...now, selected, docs, hashes: hashes(tracked), ...(exception ? { exception } : {}) };
+    if (carryFile !== undefined && (preFile === undefined || run === undefined)) throw new Error('--carry needs --pre and --run: only a post snapshot of a named /ship run carries an earlier audit');
+    const audit = preFile === undefined ? {} : auditEdits(readRecord(preFile, '--pre'), preFile, record);
+    const earlier = carryFile === undefined ? {} : { earlier: carried(readRecord(carryFile, '--carry'), carryFile, record) };
+    fs.writeFileSync(out, JSON.stringify({ ...record, ...audit, ...earlier }, null, 2) + '\n', { mode: 0o600 });
     console.log(`CANDIDATE: ${out}`);
     console.log(`base=${base} head=${now.head} branch=${now.branch || '(detached)'} mode=${mode}`);
     if (exception) console.log(`EXCEPTION: accepted by ${exception.accepted_by} ${exception.date} via ${exception.via}`);
+    if ('edited' in audit) console.log(`edited: ${Object.keys(audit.edited).map(p => JSON.stringify(p)).join(' ') || '(none)'}`);
+    if ('earlier' in earlier) console.log(`earlier: ${earlier.earlier.map(e => e.audit_id).join(' ')}`);
     console.log(`committed=${now.committed.length} staged=${now.staged.length} unstaged=${now.unstaged.length} untracked=${now.untracked.length} selected=${selected.length} docs=${docs.length} hashed=${tracked.length}`);
     for (const [label, list] of [['committed', now.committed], ['staged', now.staged], ['unstaged', now.unstaged], ['untracked', now.untracked], ['docs', docs]] as const) {
       if (list.length) console.log(`${label}: ${list.map(p => JSON.stringify(p)).join(' ')}`);
@@ -237,6 +318,59 @@ function main(argv: string[]): void {
       process.exit(3);
     }
     console.log('ATTEMPT: not-counted (the audit child\'s install check refused document-release)');
+    return;
+  }
+  if (command === 'result') {
+    const [file, ...rest] = args;
+    if (!file || file.startsWith('--')) throw new Error('result takes the child output file, then --audit-id <id> --out-dir <record dir>');
+    for (let i = 0; i < rest.length; i += 2) if (!['--audit-id', '--out-dir', '--repair-of'].includes(rest[i]!)) throw new Error(`unknown argument: ${rest[i]}`);
+    const auditId = auditIdArg(rest);
+    const outDir = path.resolve(one(rest, '--out-dir'));
+    const repairOf = optional(rest, '--repair-of');
+    const output = fs.readFileSync(file, 'utf8');
+    let check: DocsResultCheck;
+    if (!repairOf) check = checkDocsResult(output, auditId);
+    else {
+      const original = fs.readFileSync(repairOf, 'utf8');
+      const prior = checkDocsResult(original, auditId);
+      let first = true;
+      if (!prior.ok && prior.repairable) {
+        fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
+        try { fs.writeFileSync(path.join(outDir, `${auditId}-format-repair`), '', { mode: 0o600, flag: 'wx' }); } catch (e) {
+          if ((e as NodeJS.ErrnoException).code !== 'EEXIST') throw e;
+          first = false;
+        }
+      }
+      check = first ? checkDocsRepair(output, original, auditId)
+        : { ok: false, problems: ['a format repair was already used for this audit', ...(prior.ok ? [] : prior.problems)], trimmed: [], repairable: false, kept: {} };
+    }
+    if (check.trimmed.length) console.log(`KEYS_TRIMMED: ${check.trimmed.map(k => JSON.stringify(k)).join(' ')}`);
+    if (!check.ok) {
+      console.log(resultLine('gstack-docs-candidate result', 'DOCS_RESULT_INVALID', check.problems.join('; ')));
+      if (check.repairable) console.log('FORMAT_REPAIR: format-only; not an attempt. Re-ask for the last line once: gstack-docs-candidate repair-prompt <this output> --audit-id <id>, then result <reply> with --repair-of <this output>');
+      else console.log(`RETRY_NOTE: ${docsRetryNote(check.problems)}`);
+      process.exit(1);
+    }
+    if (repairOf) console.log('FORMAT_REPAIR: applied (the reply kept every value the first line gave correctly)');
+    fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
+    const resultFile = path.join(outDir, `${auditId}-result.json`);
+    const sectionFile = path.join(outDir, `${auditId}-documentation.md`);
+    fs.writeFileSync(resultFile, JSON.stringify(check.result) + '\n', { mode: 0o600 });
+    fs.writeFileSync(sectionFile, check.result.documentation_section, { mode: 0o600 });
+    console.log(`DOCS_RESULT: ok status=${check.result.status} files_updated=${check.result.files_updated.length}`);
+    console.log(`RESULT: ${resultFile}`);
+    console.log(`SECTION: ${sectionFile}`);
+    return;
+  }
+  if (command === 'repair-prompt') {
+    const [file, ...rest] = args;
+    if (!file || file.startsWith('--')) throw new Error('repair-prompt takes the child output file, then --audit-id <id>');
+    for (let i = 0; i < rest.length; i += 2) if (rest[i] !== '--audit-id') throw new Error(`unknown argument: ${rest[i]}`);
+    const auditId = auditIdArg(rest);
+    const output = fs.readFileSync(file, 'utf8');
+    const check = checkDocsResult(output, auditId);
+    if (check.ok || !check.repairable) throw new Error(`${file} is not a format-only failure of the last line, so it has no format repair: ${check.ok ? 'it is a valid result' : 'a content failure counts as an attempt (Blocked recovery, RETRY_NOTE:)'}`);
+    process.stdout.write(docsRepairPrompt(output, auditId, check.problems));
     return;
   }
   throw new Error(USAGE);

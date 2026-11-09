@@ -18,6 +18,7 @@ import { PLAN_RESULT_CODES } from './result-codes-plan';
 import { AUTOPLAN_RESULT_CODES } from './result-codes-autoplan';
 import { BROWSE_RESULT_CODES } from './result-codes-browse';
 import { CLEAN_RESULT_CODES } from './result-codes-clean';
+import { PLAIN_RESULT_CODES } from './result-codes-plain';
 
 export interface ResultCode {
   /** Stable `<a id>` in docs/troubleshooting.md. */
@@ -557,7 +558,7 @@ export const RESULT_CODES = {
   },
   GATE_REC_STALE: {
     anchor: 'gate-rec-stale',
-    summary: 'a `rec` reply was rendered before `gstack-autoplan recommend` changed the recommendations it takes, or the gate predates `rec` (a gate.json without rec_rev, rendered when `all` left changes pending)',
+    summary: 'a `rec` reply was rendered before `gstack-autoplan recommend` changed the recommendations it takes, its `--rec-hash` came from another run\'s gate, or the gate predates `rec` (a gate.json without rec_rev, rendered when `all` left changes pending)',
     fix: 'render the gate again (`gstack-gate render <dir>/gate.json --all`), relay it, and answer with the printed `--rec-hash`',
   },
   CHECKPOINT_INVALID: {
@@ -577,7 +578,7 @@ export const RESULT_CODES = {
   },
   OWNER_REPLY_REQUIRED: {
     anchor: 'owner-reply-required',
-    summary: 'an agent answered the gate (`--by agent:<id>`) without the owner\'s verbatim reply',
+    summary: 'an agent answered the gate (`--by agent:<id>`) without the owner\'s verbatim reply, or answered a user challenge in its own words (`--words-by`)',
     fix: 'pass the owner\'s words exactly with `--owner-reply "<text>"`, `--owner-reply -` (stdin) or `--owner-reply-file <path>`',
   },
   GATE_OWNER_REPLY_MISMATCH: {
@@ -603,7 +604,7 @@ export const RESULT_CODES = {
   },
   UPGRADE_BUSY: {
     anchor: 'upgrade-busy',
-    summary: 'bin/gstack-upgrade changed nothing: another live session holds a workflow lease on this installation (bin/gstack-lease live), or, at a Capy install, the caller\'s own run does, or a shared harness (capy-server) whose lease may be a sibling session\'s is under 120 minutes old, so moving the checkout would change gstack under it',
+    summary: 'bin/gstack-upgrade changed nothing: another live session holds a workflow lease on this installation (bin/gstack-lease live), or, at a Capy install, the caller\'s own run does, or a shared harness (capy-server) whose lease may be a sibling session\'s is under 120 minutes old, or a live eval run holds gstack-detach\'s ~/.gstack/locks/gstack-evals.lock, so moving the checkout would change gstack under it',
     fix: 'wait for those sessions to finish, or for a shared-harness lease to turn 120 minutes old (bin/gstack-lease list names each pid and age), then re-run bin/gstack-upgrade; GSTACK_UPGRADE_FORCE=1 overrides when you know no other session uses the checkout',
   },
   UPGRADE_FETCH_FAILED: {
@@ -770,6 +771,7 @@ export const RESULT_CODES = {
   ...AUTOPLAN_RESULT_CODES,
   ...BROWSE_RESULT_CODES,
   ...CLEAN_RESULT_CODES,
+  ...PLAIN_RESULT_CODES,
 } as const satisfies Record<string, ResultCode>;
 
 export type ResultCodeName = keyof typeof RESULT_CODES;

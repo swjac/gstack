@@ -159,7 +159,7 @@ waiting on the base, not failed ([base_red](ship-policy.md#base-red)).
 
 The one publication the unattended rules allow: when an open PR for the branch
 exists and HEAD is its pushed head, Step 18 takes the pr-body section's
-existing-PR path and posts the body (receipt first) and title through
+existing-PR path and posts the body (receipt in its Agent notes section) and title through
 `gstack-post`. It never runs `pr-create`, never pushes a commit and never runs
 `gh pr ready`; a branch with no open PR, or whose PR head is not HEAD, takes
 the handoff section. When the run committed anything (a CHANGELOG entry,
@@ -171,13 +171,13 @@ unpushed head is `QUEUE_RECEIPT_STALE` to the queue.
 
 The receipt's `review_loop` object, written from `gstack-review-scope summary
 --since <REVIEW_SINCE>`, is the loop's machine-readable outcome: `passes`
-(Step 9 full passes this ship ran, 1 or 2; up to 3 under `review_scope: all`),
+(Step 9 full passes this ship ran, 1 or 2; up to 3 under `review_scope: diff-plus-blocking` or `all`),
 `blocking_found` (every blocker the readers found, rows and dispatch ledgers
 both, [review-policy.md](review-policy.md#what-the-receipt-records)), `deferred`
-(blocking findings in unchanged code filed as issues, Step 11's late defers
-included), `noted`, `fixed` and `scope`. The
+(blocking findings in unchanged code, kept on the PR and never filed as
+issues, Step 11's late defers included), `noted`, `fixed` and `scope`. The
 summary line a parent reads prints it as `passes=<n> blocking_found=<k>
-deferred=<m>`; the PR body lists the deferred issues under `## Deferred
+deferred=<m>`; the PR body lists the deferred findings under `## Deferred
 findings` and the below-floor items under `## Review notes`. A pass that finds
 nothing is `NO FINDINGS` from every reviewer and a pass with no edits, which
 is the loop's exit, never a failed review ([review-policy.md](review-policy.md)).
@@ -192,7 +192,8 @@ A parent reads many lanes, so length is a cost it pays per lane. A READY block
 holds its required lines plus at most 150 words; a completion report holds at
 most 300 words; a subagent brief names the files to read instead of pasting
 them. Evidence goes in files the report points to. Waits go on operations,
-never on polling wakes.
+never on polling wakes, except a crew lane's warm wait under about 30 minutes
+([captain.md](../crew/docs/captain.md#lane-context)).
 
 ### Token caps and fresh-context handoffs
 
@@ -252,9 +253,13 @@ missing voice never reads as converged or as an unavailable Codex CLI.
 ### The carry across a base merge or a test-only fix
 
 When the parent merges the base in or fixes a test after the receipt was
-written, it runs `gstack-ship-receipt carry --pr <n> --base <base> --dry-run`
-instead of another /ship; on `CARRY: would carry` it runs `gstack-pregate` at HEAD
-and reruns carry with `--pregate .gstack/tmp/pregate.json`. `CARRY: carried from <old> to <new> (<reason>)` plus the
+written, it pushes that commit with `gstack-ship-release push --branch <branch-name> --early`
+(carry refuses an unpushed HEAD, `--dry-run` included), then runs
+`gstack-ship-receipt carry --pr <n> --base <base> --dry-run` instead of another
+/ship; on `CARRY: would carry` it commits and pushes any fix the same way, waits with
+`gstack-ci-carry wait --base <base>` (`CI_CARRY: none` is not a stop), runs `gstack-pregate --allow-repo-commands`
+at HEAD and reruns carry with `--pregate .gstack/tmp/pregate.json`, the order
+`gstack-ship-preflight`'s carry route prints. `CARRY: carried from <old> to <new> (<reason>)` plus the
 `GSTACK_RESULT: skill=ship status=complete head=<sha> run=<dir>` line means the receipt
 now names HEAD with a `carry` object holding the `git range-diff` evidence, and
 `ship-run.json` gains `carried_from` and `carry_reason`; the `review_loop`
@@ -278,7 +283,7 @@ tree no review saw, so /ship runs again;
 | File | Schema | Contents |
 |------|--------|----------|
 | `run.json` | `run` v1 | The manifest: `run` id, `status`, `required_phases`, each phase's `native` and `outside` outcome (`status`, `model`, `provider`), input `snapshot` hashes, `counts`, every artifact's `path` (relative to the run directory) and `sha256`, `session_kind`, `gate_rev`, `deviations`, `consumed_by`. |
-| `decisions.jsonl` | `decisions` v1 | One row per decision: `id` (`<run>-<label>` at gate revision 1, `<run>-r<rev>-<label>` after a reopen, since labels restart at each gate), `title`, `options`, `recommended`, `kind` (`auto`, `approval`, `user_challenge`), `status` (`pending`, `approved`, `overridden`, `rejected`, or `auto_kept` in a [CEO-only run](#ceo-only-runs)), `gate_rev`, and once answered `chosen`, `answered_at`, `reply`, plus how the owner answered: `owner_mode` (`rec`, `rec_except`, `tokens`, `as_is` or `unparsed`, parsed from the owner's own words), `owner_named` (his words named this item), `rec_hash` (the recommendations answered against) and `answered_role` (`human`, or `agent` relaying his words); an agent-relayed answer adds `owner_reply`, his verbatim words, which never leave in a [public copy](#the-public-copy). |
+| `decisions.jsonl` | `decisions` v1 | One row per decision: `id` (`<run>-<label>` at gate revision 1, `<run>-r<rev>-<label>` after a reopen, since labels restart at each gate), `title`, `options`, `recommended`, `kind` (`auto`, `approval`, `user_challenge`), `status` (`pending`, `approved`, `overridden`, `rejected`, or `auto_kept` in a [CEO-only run](#ceo-only-runs)), `gate_rev`, and once answered `chosen`, `answered_at`, `reply`, plus how the owner answered: `owner_mode` (`rec`, `rec_except`, `tokens`, `as_is` or `unparsed`, parsed from the owner's own words), `owner_named` (his words named this item), `rec_hash` (the recommendations answered against, bound to the run and its reviewed plan) and `answered_role` (`human`, or `agent` relaying his words); an agent-relayed answer adds `owner_reply`, his verbatim words, which never leave in a [public copy](#the-public-copy). |
 | `shadow/` | private, not an artifact | [Shadow mode](#shadow-mode) only: `ceo-only.r<rev>.jsonl` (one hidden prediction per gate item, written before the answer), `r<rev>.prompt.md` and one `<call>.reply.txt` per model call, the audit `salt`, and `r<rev>.pending` while a call is in flight. Never in `export --public`, the gate render or the owner brief. |
 | `findings.jsonl` | `findings` v1 | One row per reviewer finding: `id`, `phase`, `voice` (`native`/`outside`), `model`, `severity`, `title`, `disposition`, `plan_items`, `native_counterpart` (string or null), `source`. Rows share the review-log row shape, so `gstack-review-log --findings` derives review status from this file. |
 | `tasks.jsonl` | `tasks` v2 | Implementation tasks with `id`, `title`, `status`, `depends_on`, `findings` (ids in `findings.jsonl`), `blocked_by`, `acceptance`, optional `pr`/`item`/`tier`. |
@@ -436,7 +441,12 @@ The example above is the full run. The first `next` also takes `--kind`:
   (`GSTACK_CAPY=1`) that names no kind, is the lean run. The run is the `eng`
   phase alone with one native reviewer, whose prompt merges the CEO and Eng
   lenses (Design and DX only when scope detects them) and always asks "Any
-  outside terms, licences or rights involved?". The reviewer reads the draft
+  outside terms, licences or rights involved?". Each lens is short: the eng
+  lens is a five-question brief plus plan-eng-review's 36-line checklist when
+  the run is unattended or `--light`, the
+  others a one-paragraph role and that skill's checklist (CEO 37 lines, design
+  28, DX 34). The reviewer never gets those skills' own methods
+  (`lib/autoplan-lean.ts` `leanPrompt`). The reviewer reads the draft
   code with the plan: `git diff` from the merge base with `--base <ref>`
   (default `origin/HEAD`), untracked files included and the run directory
   left out, written into the phase's snapshot directory as `draft.diff` and
@@ -466,7 +476,11 @@ The example above is the full run. The first `next` also takes `--kind`:
   without re-review (`APPLIED: … (lean run: one gate revision; …)`) and
   approves. The gate and `gstack-owner-brief render --captain` relay work as
   in the full run. A paid-eval prereg counts as a feature.
-- **`--full`** restores every phase and both voices. Off Capy, and in an
+- **`--full`** restores every phase and both voices. Each phase's native
+  reviewer gets a five-question brief, the plan and that phase's checklist
+  (`--light`, the unattended default); the outside reviewer gets a
+  one-paragraph role and the plan. Neither gets the review skill's own
+  method, which only an interactive `/autoplan` session reads. Off Capy, and in an
   interactive session, the default stays full; `--ceo-only` stays its own run.
 
 1. **Dispatch each `ATTEMPT:`.** The native voice is a subagent on the parent's
@@ -526,6 +540,11 @@ The example above is the full run. The first `next` also takes `--kind`:
    are then recorded as `answer_words` with `words_by`, never as
    `owner_reply`; a later gate never carries them (`CARRY: no`), and
    `gstack-approvals import` lists that row under the agent, not the owner.
+   They never settle a `uc` item (a user challenge or a round-cap approval):
+   a reply in an agent's own words that would choose one, by `rec`, `as-is`
+   or a token, is refused (`OWNER_REPLY_REQUIRED`) and nothing is applied;
+   such a reply may still answer the `d` items and leave the `uc` items to
+   the owner.
    An unattended run refuses an answer
    without `--by` (`ANSWER_BY_REQUIRED`, exit 3) and records the value as
    `answered_by` on every decision row and in the review record's gate line,
@@ -987,7 +1006,7 @@ and `status: "pending"`, named in the handoff, never taken.
 - **Merge: never.** The run ends at a receipt bound to the pushed head
   (`SHIP_RECEIPT`, [ship-policy.md#ship-before-ready](ship-policy.md#ship-before-ready))
   or at a pending gate. Merging is the controller's act
-  ([captain.md](captain.md)); a green check list, an approval, or a prompt that
+  ([captain.md](../crew/docs/captain.md)); a green check list, an approval, or a prompt that
   says "merge when green" does not move it to the lane. The same holds for
   enabling auto-merge, adding the PR to a merge queue, or `gh pr ready` on a
   PR the run did not open.

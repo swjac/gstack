@@ -2,6 +2,7 @@ import { describe, test, expect, afterAll } from 'bun:test';
 import { assertSinglePreamble, extractCodexDefaultPrompt, generateOpenAIYaml } from '../scripts/gen-skill-docs';
 import { validateSkillFrontmatter } from '../scripts/skill-check';
 import { externalHostPathLeaks } from './helpers/skill-parser';
+import { RETIRED_SKILLS } from '../scripts/discover-skills';
 import { COMMAND_DESCRIPTIONS } from '../browse/src/commands';
 import { SNAPSHOT_FLAGS } from '../browse/src/snapshot';
 import * as fs from 'fs';
@@ -916,13 +917,13 @@ describe('REVIEW_DASHBOARD resolver', () => {
     });
   }
 
-  test('plan-ceo-review chaining mentions eng and design reviews', () => {
+  test('plan-ceo-review chaining mentions eng (via /autoplan) and design reviews', () => {
     // Carved skill: the chaining prose lives in sections/*.md. (It used to
     // pass against the skeleton only because the preamble's routing-injection
     // rules incidentally named these skills — that prose moved into
     // bin/gstack-skill-start in token-reduction Phase 2.)
     const content = readSkillUnion('plan-ceo-review');
-    expect(content).toContain('/plan-eng-review');
+    expect(content).toContain('Run /autoplan next (eng review)');
     expect(content).toContain('/plan-design-review');
   });
 
@@ -932,9 +933,9 @@ describe('REVIEW_DASHBOARD resolver', () => {
     expect(content).toContain('/plan-ceo-review');
   });
 
-  test('plan-design-review chaining mentions eng, ceo, and design skills', () => {
+  test('plan-design-review chaining mentions eng (via /autoplan), ceo, and design skills', () => {
     const content = readSkillUnion('plan-design-review');
-    expect(content).toContain('/plan-eng-review');
+    expect(content).toContain('Run /autoplan next (eng review)');
     expect(content).toContain('/plan-ceo-review');
     expect(content).toContain('/design-shotgun');
     expect(content).toContain('/design-html');
@@ -1302,7 +1303,7 @@ describe('PLAN_FILE_REVIEW_REPORT resolver', () => {
     expect(content).toContain('Findings');
     expect(content).toContain('VERDICT');
     expect(content).toContain('/plan-ceo-review');
-    expect(content).toContain('/plan-eng-review');
+    expect(content).toContain('| Eng Review | `/autoplan` |');
     expect(content).toContain('/plan-design-review');
     expect(content).toContain('/codex review');
   });
@@ -2306,7 +2307,8 @@ describe('preamble routing injection (bin/gstack-skill-start emission layer)', (
 
   test('routing section content includes key routing rules', () => {
     expect(routingBlock).toContain('invoke /office-hours');
-    expect(routingBlock).toContain('invoke /investigate');
+    expect(routingBlock).toContain('Bugs/errors → fix them directly');
+    expect(routingBlock).not.toContain('/investigate');
     expect(routingBlock).toContain('invoke /ship');
     expect(routingBlock).toContain('invoke /qa');
   });
@@ -2890,6 +2892,7 @@ describe('Codex generation (--host codex)', () => {
     for (const entry of fs.readdirSync(ROOT, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') continue;
       if (entry.name === 'codex') continue; // /codex is excluded from Codex output
+      if (RETIRED_SKILLS.includes(entry.name)) continue;
       if (!fs.existsSync(path.join(ROOT, entry.name, 'SKILL.md.tmpl'))) continue;
       const codexName = entry.name.startsWith('gstack-') ? entry.name : `gstack-${entry.name}`;
       skills.push({ dir: entry.name, codexName });
@@ -3348,6 +3351,7 @@ describe('Factory generation (--host factory)', () => {
     for (const entry of fs.readdirSync(ROOT, { withFileTypes: true })) {
       if (!entry.isDirectory() || entry.name.startsWith('.') || entry.name === 'node_modules') continue;
       if (entry.name === 'codex') continue;
+      if (RETIRED_SKILLS.includes(entry.name)) continue;
       if (!fs.existsSync(path.join(ROOT, entry.name, 'SKILL.md.tmpl'))) continue;
       const factoryName = entry.name.startsWith('gstack-') ? entry.name : `gstack-${entry.name}`;
       skills.push({ dir: entry.name, factoryName });
@@ -3387,7 +3391,7 @@ describe('Factory generation (--host factory)', () => {
   });
 
   test('non-sensitive skills lack disable-model-invocation', () => {
-    const NON_SENSITIVE = ['gstack-qa', 'gstack-review', 'gstack-investigate', 'gstack-browse'];
+    const NON_SENSITIVE = ['gstack-qa', 'gstack-review', 'gstack-office-hours', 'gstack-browse'];
     for (const name of NON_SENSITIVE) {
       const content = fs.readFileSync(path.join(FACTORY_DIR, name, 'SKILL.md'), 'utf-8');
       const fmEnd = content.indexOf('\n---', 4);
@@ -4302,7 +4306,7 @@ describe('codex commands must not use inline $(git rev-parse --show-toplevel) fo
 // ─── Learnings + Confidence Resolver Tests ─────────────────────
 
 describe('LEARNINGS_SEARCH resolver', () => {
-  const SEARCH_SKILLS = ['review', 'ship', 'plan-eng-review', 'investigate', 'office-hours', 'plan-ceo-review'];
+  const SEARCH_SKILLS = ['review', 'ship', 'plan-eng-review', 'office-hours', 'plan-ceo-review'];
 
   for (const skill of SEARCH_SKILLS) {
     test(`${skill} generated SKILL.md contains learnings search`, () => {
@@ -4355,7 +4359,7 @@ describe('LEARNINGS_SEARCH resolver', () => {
 });
 
 describe('LEARNINGS_LOG resolver', () => {
-  const LOG_SKILLS = ['review', 'retro', 'investigate'];
+  const LOG_SKILLS = ['review', 'retro'];
 
   for (const skill of LOG_SKILLS) {
     test(`${skill} generated SKILL.md contains learnings log`, () => {
@@ -4531,7 +4535,7 @@ describe('voice-triggers processing', () => {
 
   test('Claude root router routes every skill voice trigger the catalog trim drops', () => {
     const routing = between(fs.readFileSync(path.join(ROOT, 'SKILL.md'), 'utf-8'), '**Routing rules', '**Route only to skills');
-    const skills = fs.readdirSync(ROOT).filter(d => !fs.lstatSync(path.join(ROOT, d)).isSymbolicLink() && fs.existsSync(path.join(ROOT, d, 'SKILL.md.tmpl')));
+    const skills = fs.readdirSync(ROOT).filter(d => !fs.lstatSync(path.join(ROOT, d)).isSymbolicLink() && fs.existsSync(path.join(ROOT, d, 'SKILL.md.tmpl')) && !RETIRED_SKILLS.includes(d));
     let routed = 0;
     for (const skill of skills) {
       const triggers = extractVoiceTriggers(fs.readFileSync(path.join(ROOT, skill, 'SKILL.md.tmpl'), 'utf-8').replace(/\r\n/g, '\n'));
@@ -4595,10 +4599,8 @@ describe('voice-triggers processing', () => {
     expect(ship.slice(0, ship.indexOf('\n---', 4))).not.toContain('codex_default_prompt:');
 
     // The runtime-read and host-read keys survive the strip.
-    const investigate = fs.readFileSync(path.join(ROOT, 'investigate', 'SKILL.md'), 'utf-8');
-    const invFm = investigate.slice(0, investigate.indexOf('\n---', 4));
-    expect(invFm).toContain('hooks:');
-    expect(invFm).toContain('gbrain:');
+    expect(genFm).toContain('hooks:');
+    expect(genFm).toContain('gbrain:');
   });
 });
 

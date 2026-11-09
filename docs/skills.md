@@ -7,11 +7,9 @@ Detailed guides for every gstack skill — philosophy, workflow, and examples.
 | [`/office-hours`](#office-hours) | **YC Office Hours** | Start here. Six forcing questions that reframe your product before you write code. Pushes back on your framing, challenges premises, generates implementation alternatives. Design doc feeds into every downstream skill. |
 | [`/spec`](#spec) | **Spec Author** | Turn vague intent into a precise, executable spec in five phases. Backlog-ready output that downstream skills can pick up. Optional agent spawn at the end. |
 | [`/plan-ceo-review`](#plan-ceo-review) | **CEO / Founder** | Rethink the problem. Find the 10-star product hiding inside the request. Four modes: Expansion, Selective Expansion, Hold Scope, Reduction. |
-| [`/plan-eng-review`](#plan-eng-review) | **Eng Manager** | Lock in architecture, data flow, diagrams, edge cases, and tests. Forces hidden assumptions into the open. |
 | [`/plan-design-review`](#plan-design-review) | **Senior Designer** | Interactive plan-mode design review. Rates each dimension 0-10, explains what a 10 looks like, fixes the plan. Works in plan mode. |
 | [`/design-consultation`](#design-consultation) | **Design Partner** | Build a complete design system from scratch. Knows the landscape, proposes creative risks, generates realistic product mockups. Design at the heart of all other phases. |
 | [`/review`](#review) | **Staff Engineer** | Find the bugs that pass CI but blow up in production. Auto-fixes the obvious ones. Flags completeness gaps. Advisory simplification lens flags over-built code — never blocks, never auto-applies. |
-| [`/investigate`](#investigate) | **Debugger** | Systematic root-cause debugging. Iron Law: no fixes without investigation. Traces data flow, tests hypotheses, stops after 3 failed fixes. |
 | [`/verify`](#verify) | **Build Loop** | Run the repo's checks and the tests `/ship`'s pre-gate would pick for your change, fix, repeat until green, then hand off to `/ship`. Never green on an unmapped change. |
 | [`/design-review`](#design-review) | **Designer Who Codes** | Live-site visual audit + fix loop. 80-item audit, then fixes what it finds. Atomic commits, before/after screenshots. |
 | [`/design-shotgun`](#design-shotgun) | **Design Explorer** | Generate multiple AI design variants, open a comparison board in your browser, and iterate until you approve a direction. Taste memory biases toward your preferences. |
@@ -34,7 +32,7 @@ Detailed guides for every gstack skill — philosophy, workflow, and examples.
 | [`/retro`](#retro) | **Eng Manager** | Team-aware weekly retro. Per-person breakdowns, shipping streaks, test health trends, growth opportunities. |
 | [`/browse`](#browse) | **QA Engineer** | Give the agent eyes. Drives your Aside browser first — real sessions, real clicks, real screenshots — through deterministic `aside repl` scripts, and falls back to gstack's own Chromium (~100ms per command) when Aside isn't there. |
 | [`/setup-browser-cookies`](#setup-browser-cookies) | **Session Manager** | Copy selected cookies from Chrome, Chromium, Brave, Edge, Windows-only Opera and Opera GX, or macOS-only Comet and Arc into the fallback browser. Choose your profile and domains; check sign-in separately. Unnecessary on Aside, which already has your sessions. |
-| [`/autoplan`](#autoplan) | **Review Pipeline** | One command, fully reviewed plan. Runs CEO → design → DX → eng review automatically (eng always last, so the shipping gate reviews the final amended plan) with encoded decision principles. Surfaces only taste decisions for your approval. |
+| [`/autoplan`](#autoplan) | **Review Pipeline** | One command, reviewed plan. In an interactive session it runs CEO → design → DX → eng review from each skill's own method (eng always last, so the shipping gate reviews the final amended plan) with encoded decision principles, and surfaces only taste decisions for your approval. A run driven by `gstack-autoplan` (the Capy default) gives its reviewers short checklists instead of those methods: the lean run is one reviewer, `--full` one per phase ([what each run loads](#what-each-run-loads)). |
 | [`/plan-devex-review`](#plan-devex-review) | **DX Reviewer** | Plan-stage DX review. TTHW (time-to-hello-world), magical moments, friction points, persona traces, and error messages scored for the agents that read them ([agent-ready errors](agent-ready-errors.md)). Three modes: Expansion, Polish, Triage. |
 | [`/devex-review`](#devex-review) | **DX Reviewer (live)** | Live developer experience audit. Walks the actual onboarding flow, measures TTHW, catches the docs lies, and triggers CLI errors the way an agent meets them (no terminal, contained, redacted) through `gstack-error-capture`. |
 | [`/plan-tune`](#plan-tune) | **Question Tuner** | Self-tune AskUserQuestion sensitivity per question. Mark questions as never-ask, always-ask, or only-for-one-way. |
@@ -47,7 +45,7 @@ Detailed guides for every gstack skill — philosophy, workflow, and examples.
 | [`/write-skill`](#write-skill) | **Skill Editor** | Write or improve an agent skill without bloat: edit ladder, size per level, skill-to-bin drift check, full diets with a before/after test. |
 | [`/test-audit`](#test-audit) | **Test Auditor** | Sweep existing tests for low-value, implementation-coupled or duplicate tests. Report-only unless you approve a batch. |
 | [`/landing-report`](#landing-report) | **Ship Queue Dashboard** | Read-only snapshot of the workspace-aware ship queue. Which version slots are claimed, which sibling workspaces have WIP. |
-| [`/captain`](#captain) | **Crew Controller** | Run many coding agents from one controller. Lanes build and send a READY block; the controller validates it, merges through trains (stamp on call, verify, merge with the expected head, verify again; `train land` per slot under `changelog_fragments`), keeps the digest, relays approvals in three fixed shapes and runs a daily flaky-fix pass. Also answers to `/crew`. |
+| [`/captain`](#captain) | **Crew Controller** (Capy only: [crew/](../crew/README.md)) | Run many coding agents from one controller. Lanes build and send a READY block; the controller validates it, merges through trains (stamp on call, verify, merge with the expected head, verify again; `train land` per slot under `changelog_fragments`), keeps the digest, relays approvals in three fixed shapes and runs a daily flaky-fix pass. Also answers to `/crew`. |
 | [`/benchmark-models`](#benchmark-models) | **Model Benchmark** | Side-by-side cross-model benchmark for skills (Claude vs GPT vs Gemini, plus particle-1 and DeepSeek V4.1 Flash through OpenRouter). Latency, tokens, cost, optional LLM-judged quality. |
 | [`/eval-plan`](#eval-plan) | **Eval Planner** | Preregister a paid eval (bars, arms, decoys, stop rules), dry-run it for $0 with the stub model, pilot three priced items, then approve the spend from the extrapolation table. |
 | | | |
@@ -127,7 +125,7 @@ Recommends A because you learn from real usage. CRM data comes naturally in week
 
 ### The design doc
 
-Both modes end with a design doc written to `~/.gstack/projects/` — and that doc feeds directly into `/plan-ceo-review` and `/plan-eng-review`. The full lifecycle is now: `office-hours → plan → implement → review → QA → ship → retro`.
+Both modes end with a design doc written to `~/.gstack/projects/` — and that doc feeds directly into `/plan-ceo-review` and `/autoplan`. The full lifecycle is now: `office-hours → plan → implement → review → QA → ship → retro`.
 
 After the design doc is approved, `/office-hours` reflects on what it noticed about how you think — not generic praise, but specific callbacks to things you said during the session. The observations appear in the design doc too, so you re-encounter them when you re-read later.
 
@@ -185,62 +183,11 @@ Visions and decisions are persisted to `~/.gstack/projects/` so they survive bey
 
 ---
 
-## `/plan-eng-review`
+## `/plan-eng-review` (cut)
 
-This is my **eng manager mode**.
+`/plan-eng-review` was cut on 2026-11-06 (GST-1698) after two evals found no gain. In the seeded-flaw panel, plain Opus 5.5 with no gstack found the planted engineering flaws in 15 of 16 reviews. In the wave 1 outcome test, plain Opus 5.5 built 22 of 22 planned features correctly, and a session told to use the skill cost 7.1 times a plain one. The evidence is in GST-1218 and gstack-evals#253.
 
-Once the product direction is right, I want a different kind of intelligence entirely. I do not want more sprawling ideation. I do not want more "wouldn't it be cool if." I want the model to become my best technical lead.
-
-This mode should nail:
-
-* architecture
-* system boundaries
-* data flow
-* state transitions
-* failure modes
-* edge cases
-* trust boundaries
-* test coverage
-
-And one surprisingly big unlock for me: **diagrams**.
-
-LLMs get way more complete when you force them to draw the system. Sequence diagrams, state diagrams, component diagrams, data-flow diagrams, even test matrices. Diagrams force hidden assumptions into the open. They make hand-wavy planning much harder.
-
-So `/plan-eng-review` is where I want the model to build the technical spine that can carry the product vision.
-
-### Example
-
-Take the same listing app example.
-
-Let's say `/plan-ceo-review` already did its job. We decided the real feature is not just photo upload. It is a smart listing flow that:
-
-* uploads photos
-* identifies the product
-* enriches the listing from the web
-* drafts a strong title and description
-* suggests the best hero image
-
-Now `/plan-eng-review` takes over.
-
-Now I want the model to answer questions like:
-
-* What is the architecture for upload, classification, enrichment, and draft generation?
-* Which steps happen synchronously, and which go to background jobs?
-* Where are the boundaries between app server, object storage, vision model, search/enrichment APIs, and the listing database?
-* What happens if upload succeeds but enrichment fails?
-* What happens if product identification is low-confidence?
-* How do retries work?
-* How do we prevent duplicate jobs?
-* What gets persisted when, and what can be safely recomputed?
-
-And this is where I want diagrams — architecture diagrams, state models, data-flow diagrams, test matrices. Diagrams force hidden assumptions into the open. They make hand-wavy planning much harder.
-
-That is `/plan-eng-review`.
-
-Not "make the idea smaller."
-**Make the idea buildable.**
-
-One note on invocation: in plan mode, the skill skips the "what should I review?" scope question and reviews your active plan automatically, announcing its pick in one line ("Scope gate: plan mode — auto-selected B") so you can redirect it. Name a target explicitly ("review PLAN.md") and your choice wins in any mode. Outside plan mode with nothing named, it asks first — that gate is a hard stop.
+The standalone skill no longer installs, and `./setup` removes an existing gstack-owned `/plan-eng-review` entry on every host. Its review methodology stays as `/autoplan`'s eng phase (Phase 3), unchanged, in an interactive session. A run driven by `gstack-autoplan` (the Capy default) gives its reviewer only the skill's 36-line checklist, not the methodology. To review a plan's architecture, data flow, edge cases and tests, run `/autoplan`. `/review` covers the diff before `/ship`.
 
 ### Review Readiness Dashboard
 
@@ -260,7 +207,7 @@ Every review (CEO, Eng, Design) logs its result. At the end of each review, you 
 +====================================================================+
 ```
 
-Eng Review is the only required gate (disable with `gstack-config set skip_eng_review true`). CEO and Design are informational — recommended for product and UI changes respectively.
+Eng Review is the only required gate; `/review` on the diff or `/autoplan`'s eng phase satisfies it (disable with `gstack-config set skip_eng_review true`). CEO and Design are informational — recommended for product and UI changes respectively.
 
 Diff reviews use the `review_freshness` grade computed by `gstack-review-read`, shared by `/ship` and `/land-and-deploy`. CURRENT requires a clean, reviewer-reported completed and converged pass whose captured start and finish fingerprints match the current working-tree content. Tracked edits and non-ignored untracked source both count; an identical commit hash or zero commits since review is not a fallback.
 
@@ -270,7 +217,7 @@ Plan-file reviews retain their existing seven-day freshness handling and optiona
 
 ### Plan-to-QA flow
 
-When `/plan-eng-review` finishes the test review section, it writes a test plan artifact to `~/.gstack/projects/`. When you later run `/qa`, it picks up that test plan automatically — your engineering review feeds directly into QA testing with no manual copy-paste.
+When an eng review writes a test plan artifact to `~/.gstack/projects/`, a later `/qa` picks up that test plan automatically — your engineering review feeds directly into QA testing with no manual copy-paste.
 
 ---
 
@@ -282,7 +229,7 @@ Most plans describe what the backend does but never specify what the user actual
 
 `/plan-design-review` catches all of this during planning, when it's cheap to fix.
 
-It works like `/plan-ceo-review` and `/plan-eng-review` — interactive, one issue at a time, with the **STOP + AskUserQuestion** pattern. It rates each design dimension 0-10, explains what a 10 looks like, then edits the plan to get there. The rating drives the work: rate low = lots of fixes, rate high = quick pass. Like `/plan-eng-review`, it skips the "what should I review?" scope question in plan mode and targets your active plan automatically (announced in one line so you can redirect); an explicitly named target wins in any mode.
+It works like `/plan-ceo-review` — interactive, one issue at a time, with the **STOP + AskUserQuestion** pattern. It rates each design dimension 0-10, explains what a 10 looks like, then edits the plan to get there. The rating drives the work: rate low = lots of fixes, rate high = quick pass. It skips the "what should I review?" scope question in plan mode and targets your active plan automatically (announced in one line so you can redirect); an explicitly named target wins in any mode.
 
 Seven passes over the plan: information architecture, interaction state coverage, user journey, AI slop risk, design system alignment, responsive/accessibility, and unresolved design decisions. For each pass, it finds gaps and either fixes them directly (obvious ones) or asks you to make a design choice (genuine tradeoffs).
 
@@ -418,6 +365,8 @@ This is my **designer who codes mode**.
 
 It runs an 80-item visual audit on your live site — in your Aside browser, so it sees exactly what a logged-in you sees — then enters a fix loop: for each design finding, it locates the source file, makes the minimal CSS/styling change, commits with `style(design): FINDING-NNN`, re-navigates to verify, and takes before/after screenshots. One commit per fix, fully bisectable.
 
+**`--build` (opt-in, for UI you are building).** `/design-review --build <preview url>` skips the clean-tree check and never commits: it lists the states your change can show, serves them on a loopback preview with canned API answers ([preview recipe](howto-preview-a-frontend.md)), lints each one with `gstack-design-lint --scope app` at 1440 and 375, screenshots them, fixes what fails for up to three rounds, then runs one read-only final pass. `gstack-design-build` turns that evidence into one `DESIGN_BUILD:` line (clean, waived, open, incomplete or unrendered); a skipped render, a state it could not reach or an API call the preview could not answer is never clean.
+
 The self-regulation heuristic is tuned for design work — CSS-only changes get a free pass (they are inherently safe and reversible), but changes to component JSX/TSX files count against the risk budget. Hard cap at 30 fixes. If the risk score exceeds 20%, it stops and asks.
 
 **Design detector.** When you have [impeccable](https://impeccable.style) installed, its engine runs first: on a URL the page's rendered DOM is dumped (linked styles inlined) and scanned; on a feature branch with no URL the changed frontend files are scanned (`.dart` files excepted: they count as frontend scope, but the engine reads web sources). Every mechanical finding arrives as a `FINDING-NNN` tagged with its rule id (`[nested-cards]`, `[low-contrast]`), and the report closes with `Detector: N → M`. gstack never runs impeccable's installer; when no engine is present it offers, once, to download the engine binary (checksum-pinned, logged in the egress ledger) and remembers the answer; without it the audit is unchanged. `gstack-config set design_detector off` disables the pre-pass.
@@ -520,7 +469,7 @@ Not every page needs the full Pretext engine. The skill reads the design and pic
 ### The refinement loop
 
 1. Reads the approved mockup from `approved.json`, plus any page archetype and section outline you picked on the board, which it builds as given instead of asking again
-2. Uses GPT-4o vision to extract implementation spec (colors, typography, layout)
+2. Extracts an implementation spec (colors, typography, layout) with the provider's vision model (OpenAI gpt-5.5, or Gemini when only a Gemini key is set; `GSTACK_DESIGN_MODEL` overrides)
 3. Generates self-contained HTML with Pretext inlined (15KB, zero network dependency)
 4. Spins up a live-reload server so you see changes instantly
 5. Screenshots at 3 viewports (mobile, tablet, desktop) to verify layout
@@ -655,11 +604,11 @@ I want the model imagining the production incident before it happens.
 
 ---
 
-## `/investigate`
+## `/investigate` (cut)
 
-When something is broken and you don't know why, `/investigate` is your systematic debugger. It follows the Iron Law: **no fixes without root cause investigation first.**
+`/investigate` was cut on 2026-11-07 (GST-1717) after a preregistered eval found no gain. On 18 real bug-fix tasks that plain Opus 5.5 solves about half the time, 20 trials each, Opus told to use /investigate passed 50.0% of trials against 47.2% with no skill: +2.8 points (95% CI -5.8 to +11.4), below the 10-point lift the run could detect. A passing fix cost about 43% more with the skill. The evidence is GEVA-380's R3c result, [gstack-evals c90ab277, wiki/board/2026-11-07-geva-380-r3c-results.md](https://github.com/garrytan/gstack-evals/blob/c90ab277/wiki/board/2026-11-07-geva-380-r3c-results.md).
 
-It leaves the order and tools to the model, keeps a few guards (stop and ask after three failed hypotheses, ask before a fix touches more than five files, lock edits to the affected module), reads a recipe for flakes, order-dependent failures, races and eval regressions, and ends with a structured debug report. It used to walk a five-phase procedure; Opus 5.5 followed none of it in 46 recorded sessions, so the procedure was dropped (GST-938).
+The skill no longer installs, and `./setup` removes an existing gstack-owned `investigate` / `gstack-investigate` entry on every host, along with the opt-in /investigate gate's hooks. For a bug, fix it directly: check the cause once, and when it is still unclear, write a focused test that fails on the bug before any edit, then fix the root cause and rerun the test. `/verify` runs the repo's checks while you build, and `/qa` tests a running site, API or CLI and fixes what it finds.
 
 ---
 
@@ -667,7 +616,7 @@ It leaves the order and tools to the model, keeps a few guards (stop and ask aft
 
 `/verify` is the loop you run while you build: change something, run the repo's checks, fix what broke, run again. `gstack-checks detect` finds the checks the repo already declares (a `gstack:verify:` line or a `## Health Stack` section in CLAUDE.md, else package.json scripts, tsconfig, eslint or biome, pyproject, Cargo.toml, go.mod) and never makes one up. `gstack-checks run` runs them plus the tests `/ship`'s pre-gate selects for your change, using pregate's own selector, so a green `/verify` predicts a green pre-gate. `/health` finds its tools with the same detector (`gstack-checks detect --for health`), which adds its test, knip, shellcheck and gbrain dimensions.
 
-It asks once before running any repo command (`gstack-checks trust`) and asks again when a command changes. A touched file no test covers is `UNMAPPED`, a selection that ran zero tests is `ZERO_RUN`, and neither counts as green. A missing tool or service is reported, not worked around. It stops after five runs or when the same failure comes back twice, and sends a stubborn red to `/investigate`. When everything passes, `gstack-checks status` prints `READY_FOR_SHIP tree=<tree>` without rerunning anything, and you run `/ship`. It never reviews, bumps versions, pushes or opens a PR.
+It asks once before running any repo command (`gstack-checks trust`) and asks again when a command changes. A touched file no test covers is `UNMAPPED`, a selection that ran zero tests is `ZERO_RUN`, and neither counts as green. A missing tool or service is reported, not worked around. It stops after five runs or when the same failure comes back twice, and asks for a focused failing test and a root-cause trace before another fix to a stubborn red. When everything passes, `gstack-checks status` prints `READY_FOR_SHIP tree=<tree>` without rerunning anything, and you run `/ship`. It never reviews, bumps versions, pushes or opens a PR.
 
 ---
 
@@ -751,14 +700,14 @@ A lot of branches die when the interesting work is done and only the boring rele
 
 ### The PR body
 
-`/ship` writes the PR body from the diff, the receipt and the review, and a reader who was not in the session decides the merge from it. On Capy (`CAPY_PR: on`) the body opens with four sections, in this order, before the standard Summary, Test plan and Documentation sections:
+`/ship` writes the PR body from the diff, the receipt and the review, and a reader who was not in the session decides the merge from it. The front is for people and the end is for machines: the body opens with one or two plain sentences saying what changed for someone using the project and which README goal it serves, and it ends with one collapsed **Agent notes** section (`<!-- gstack:agent-notes -->` then `<details><summary>Agent notes</summary>`) that holds the ship receipt, the approval and Plan lines, issue codes and the review-loop lines gstack's tools read. The title follows the same shape: plain words first, an issue code only at the end (`Stop gstack from hitting GitHub's rate limit while it waits on PRs (GST-1713)`), checked by `gstack-plain-title` (see [Plain titles](ship-policy.md#plain-titles)). On Capy (`CAPY_PR: on`) the opening is followed by three sections, in this order, before the standard Summary, Test plan and Documentation sections:
 
 1. **`## What changed`**: one to three captioned before/after images from `gstack-pr-shots` or a UI screenshot, highest-signal first, with a collapsed text version under each.
 2. **`## Why`**: two or three sentences. The first states the problem in the person's words (the issue, the message, the failing run), then the cause and the user-visible effect.
 3. **`## Blast radius`**: what else the change touches and the one fact that makes that safe, with the evidence-ladder rung that fact reached (a test that exercises the shared path, a grep over every caller, a measured run). A change to a shared helper, a generated file, a selection list or a policy default always has one; a leaf fix says so in one line.
-4. **`## Approvals`**: the output of `gstack-approvals render`, verbatim. On a private repository that is the table; on a public repository, or one whose visibility gh cannot read, it is only `Approved: yes|no (record <id>)`, because GitHub keeps every earlier version of a PR description.
+`## Approvals`, the output of `gstack-approvals render` verbatim, goes inside Agent notes. On a private repository that is the table; on a public repository, or one whose visibility gh cannot read, it is only `Approved: yes|no (record <id>)`, because GitHub keeps every earlier version of a PR description. The table shows each local path in Asked, Covers and Still pending as `…/<file name>`, so the home directory, user name and Drive folder in those paths stay out of the body; Exact words stays verbatim, and `gstack-approvals list` keeps the full path. For a private repository that may go public, `render --redacted` prints the public form, byte for byte; `--redacted` with `--full` is refused.
 
-Before the body is composed, `gstack-prose-lint` reads the Why, Summary and Blast radius drafts (`--sections 'Why,Summary,Blast radius' --gate`) and the CHANGELOG entry (`--base origin/<base> --gate`), and a `PROSE_LINT_FOUND` line names the sentence to rewrite; the rest of the body is advisory. The Captain's merge-ask template (`captain/templates/merge-ask.md`) carries the same four sections, so a READY report and its PR say the same thing.
+Before the body is composed, `gstack-prose-lint` reads the Why, Summary and Blast radius drafts (`--sections 'Why,Summary,Blast radius' --gate`) and the CHANGELOG entry (`--base origin/<base> --gate`), and a `PROSE_LINT_FOUND` line names the sentence to rewrite; the rest of the body is advisory. The Captain's merge-ask template (`captain/templates/merge-ask.md`) carries the same sections, so a READY report and its PR say the same thing.
 
 ### Versions: where `/ship` looks, and when it ships without one
 
@@ -832,7 +781,7 @@ Claude: Claim: #2187 caches the skill census so `bun run skill:check` stops
 
         Verdict: CLOSE. The base solves the problem another way (a2f9c01). Nothing
         was pushed and the PR stays open; say "close it" and I will post the reason
-        and the superseding commit, with thanks to its author.
+        and the superseding commit from the bot account, with thanks to its author.
 ```
 
 Three verdicts, one chosen before anything is pushed. **MODERNIZE**: the claim still
@@ -892,7 +841,7 @@ bounded scan and discloses inaccessible history or incomplete coverage. It reads
 raw uncommitted source without running project hooks or filters. It never edits
 code, runs project tests, saves a report, or creates issues or PRs.
 
-`/plan-eng-review` applies the same criteria to the plan and proposed callers.
+`/autoplan`'s eng phase applies the same criteria to the plan and proposed callers.
 `/review` checks the diff and related callers even on tiny changes. These scoped
 checks do not run the history audit. Optional extractions are advisory and require
 approval; they do not block a clean review or reduce its score. Actual defects
@@ -934,7 +883,7 @@ gstack's own templates and for any skill folder you own.
 ## `/test-audit`
 
 Find existing tests that cost more than they protect. `/review`, `/ship`, `/qa` and
-`/plan-eng-review` apply the same [test value bar](test-value-bar.md) to tests in a
+`/autoplan`'s eng phase apply the same [test value bar](test-value-bar.md) to tests in a
 diff; `/test-audit` sweeps the tests that already exist.
 
 ```text
@@ -1020,7 +969,7 @@ sets the defaults that keep it from coming back.
 - **Detect.** One program fetches each crew thread (`tools.thread.get`, with its transcript) to files, then
   `gstack-runaway scan --dir <dir>` prints a `RUNAWAY:` line per thread and a `FLAG:` line per limit crossed:
   own tokens past 500M or active past 3 days (rotate), a subagent past 100M (stop), empty wakes past 25% of the
-  last 40 turns, and review rounds past 2 per PR. Captains are reported, never rotated.
+  last 40 turns (warm-wait check-ins are left out), and review rounds past 2 per PR. Captains are reported, never rotated.
 - **Stop.** A live subagent past 100M is stopped with its reason. A thread is rotated at a clean point through
   a handoff file and a successor brief (`runaway-stopper/templates/`), then archived by its own Captain. A thread
   mid-/ship or mid-merge gets `DEFER:` and nothing happens until that work finishes.
@@ -1087,6 +1036,8 @@ Claude: UBICLOUD_API_KEY: set; UBI_OWNER=lane7
 This is my **Chief Security Officer**.
 
 Run `/cso` for a bounded static investigation with an application model, challenged findings, and explicit coverage; static assessment remains available when no runtime or scanner catalog profile is qualified. With matching qualified profiles, `/cso --comprehensive` can prepare Node/Bun, Python, and Rails applications in contained local runtimes, reproduce a defect, and retain a reviewable repair candidate without changing the working branch. An out-of-process witness can authenticate the external boot, legitimate-control, and security assertions and issue a `runtime_tested` bundle. Project-test completion remains `self_reported` because target code shares that process and can forge reporter output or terminate the runner; recorded command, count, exit, and output hashes are diagnostic evidence, not a target-independent completion witness. Every report shows assertion, test-completion, and review assurance separately. The `tested` state is reserved for a future target-independent witness and is not emitted today. `/cso --doctor`, `--resume`, `--replay`, and `--recheck` diagnose prerequisites, recover interrupted work, repeat recorded verification, and establish current-source closure from fresh evidence.
+
+Contained runtime and scanner execution needs Docker and a matching qualified profile. The runtime catalog qualifies ten images: Node 24.4.0, Bun 1.3.10, Python 3.13.4 with uv 0.8.0, Rails on Ruby 3.4.4, and PostgreSQL 17.2, each for linux/amd64 and linux/arm64. The scanner catalog qualifies twelve: gitleaks, OSV-Scanner, Schemathesis, Semgrep, Trivy and zizmor on both platforms. Without Docker, or where no profile matches (native Windows Docker, for example), `/cso` runs static assessment only.
 
 ```
 You:   /cso
@@ -1288,9 +1239,9 @@ English in, diagram out. Describe the diagram (or paste mermaid source) and you 
 
 This is my **review autopilot mode**.
 
-Running `/plan-ceo-review`, then `/plan-design-review`, then `/plan-eng-review` individually means answering 15-30 intermediate questions. Each question is valuable, but sometimes you want the gauntlet to run without stopping for every decision.
+Running `/plan-ceo-review`, `/plan-design-review` and `/plan-devex-review` individually means answering 15-30 intermediate questions. Each question is valuable, but sometimes you want the gauntlet to run without stopping for every decision.
 
-`/autoplan` reads the review skills from disk and runs them sequentially: CEO → Design (if UI scope) → DX (if developer-facing scope) → Eng, always last — the required shipping gate reviews the final amended plan, not a stale one. It makes decisions automatically: each question resolves to its recommended option by default, with six encoded principles (prefer completeness, match existing patterns, choose reversible options, prefer the option the user chose for similar past decisions, defer ambiguous items, and escalate security) breaking ties and deciding questions that carry no recommendation. Taste decisions (close approaches, borderline scope expansions, cross-model disagreements) get saved and presented at a final approval gate.
+In an interactive session, `/autoplan` reads the review skills from disk and runs them sequentially: CEO → Design (if UI scope) → DX (if developer-facing scope) → Eng, always last — the required shipping gate reviews the final amended plan, not a stale one. It makes decisions automatically: each question resolves to its recommended option by default, with six encoded principles (prefer completeness, match existing patterns, choose reversible options, prefer the option the user chose for similar past decisions, defer ambiguous items, and escalate security) breaking ties and deciding questions that carry no recommendation. Taste decisions (close approaches, borderline scope expansions, cross-model disagreements) get saved and presented at a final approval gate.
 
 One command, fully reviewed plan out.
 
@@ -1311,6 +1262,16 @@ You:    1) Yes, add search. 2) Option A.
 
 Claude: Plan complete. 9 decisions auto-resolved, 2 taste decisions approved.
 ```
+
+### What each run loads
+
+How deep the review goes depends on who drives the run.
+
+- **Interactive session** (no parent agent): the session model reads each phase's review skill, its SKILL.md and review sections, and works through that method itself. Each phase also sends the plan to a native reviewer subagent, which gets a five-question brief but not the skill, and to an outside voice from another model family (Codex) when one is available.
+- **Lean run** (`--kind feature`, the default for an unattended run on Capy): one engineering reviewer and nothing else. Its prompt holds the five-question eng brief, the 36-line eng checklist (unattended or `--light` runs only), a one-paragraph CEO role with the 37-line CEO checklist, the 28-line design and 34-line DX checklists only when scope detects UI or developer-facing work, and the draft code. It does not run the CEO, design or DX skills' own methods. There is no outside voice and one round.
+- **Full run** (`--full`, and the default for an unattended run off Capy): a phase per area, CEO → design → DX → eng, each with two voices. The native reviewer gets the five-question brief, the plan and, in an unattended or `--light` run, that phase's checklist; the outside reviewer gets a one-paragraph role and the plan. Neither gets the review skill's own method.
+
+The lean and full kinds are runs a parent agent drives through `gstack-autoplan` ([autoplan/DRIVER.md](../autoplan/DRIVER.md), [unattended.md](unattended.md)). An interactive session that sees `SESSION_KIND: unattended` hands off to the same runner.
 
 ---
 
@@ -1407,7 +1368,7 @@ selection. See [model policy](model-policy.md) for pins, precedence and recovery
 
 ### Three modes
 
-**Review** — run `codex review` against the current diff. Codex reads every changed file, classifies findings by severity (P1 critical, P2 high, P3 medium), and returns a PASS/FAIL verdict. Any P1 finding = FAIL. The review is fully independent — Codex doesn't see Claude's review.
+**Review** — send the current diff to Codex through `codex exec` with gstack's review prompt (the built-in `codex review --base` takes no prompt). Codex reads every changed file, classifies findings by severity (P1 critical, P2 high, P3 medium), and returns a PASS/FAIL verdict. Any P1 finding = FAIL. The review is fully independent — Codex doesn't see Claude's review.
 
 A severity-gate PASS is separate from [review freshness](#review-readiness-dashboard): unresolved recorded findings (`findings > findings_fixed`, with missing `findings_fixed` treated as zero) prevent CURRENT even when the gate passes. This does not change the severity gate. Fixes still require a new completed, unchanged review pass before the fixed tree can grade CURRENT.
 
@@ -1482,8 +1443,6 @@ You can override any MEDIUM warning. Two catastrophic shapes are hard-denied ins
 
 Restrict all file edits to a single directory. When you're debugging a billing bug, you don't want Claude accidentally "fixing" unrelated code in `src/auth/`. `/freeze src/billing` blocks all Edit, Write and NotebookEdit (Jupyter notebook) operations outside that path.
 
-`/investigate` activates this automatically — it detects the module being debugged and freezes edits to that directory.
-
 ```
 You:   /freeze src/billing
 
@@ -1511,7 +1470,7 @@ Remove the `/freeze` boundary, allowing edits everywhere again. The hooks stay r
 
 One controller, many lanes. `/captain` (also `/crew`) teaches a coordinating agent the
 operating model that keeps dozens of worker threads merging into one base branch without
-turning it red.
+turning it red. `./setup` installs it only on a Capy machine; see [crew/README.md](../crew/README.md).
 
 ```text
 You: /captain
@@ -1540,7 +1499,7 @@ id in the READY), the skill ships both as options for the crew rules file.
 
 Templates (CREW.md, AGENTS.md, NOTES.md, DIGEST.md, the flaky ledger, the lane report,
 the READY block, the slot call, the lane brief, the plan and merge asks, the daily automation prompt)
-live in `captain/templates/`; the team setup guide for Capy is [docs/captain.md](captain.md).
+live in `captain/templates/`; the team setup guide for Capy is [crew/docs/captain.md](../crew/docs/captain.md).
 
 ## `/gstack-upgrade`
 

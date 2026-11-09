@@ -15,16 +15,18 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { mergeChangelogs, parseChangelog } from './changelog-check';
+import { MIN_POLL_MS, pollDelayMs } from './gh-poll';
 import { fragmentSlug, readFragments } from './changelog-fragments';
 import { restamp, versionAtRef } from './restamp';
-import { acquireLandLock, lockLabel, readLock, writeLock, type LandLockPhase } from './ship-queue-land-lock';
+import { acquireLandLock, lockLabel, readLock, writeLock, type LandLockPhase } from '../crew/lib/ship-queue-land-lock';
 import { matchesAny, type ShipPolicy } from './ship-policy';
 import { ciAtHead, loadBasePolicy, type QueueContext, type StepOutput } from './ship-queue';
-import { QUEUE_DIR_REL, git, writeJsonAtomic, type QueueFailure } from './ship-queue-gate';
+import { QUEUE_DIR_REL, git, writeJsonAtomic, type QueueFailure } from '../crew/lib/ship-queue-gate';
+import { landPlan } from './plan-record';
 import { bindShippedReceipt } from './ship-receipt-depth';
-import { TERMINAL_STATES, freezeLockCleared, loadReady, loadTrain, rebuildFromNotes, repoIdentity } from './ship-queue-train-record';
+import { TERMINAL_STATES, freezeLockCleared, loadReady, loadTrain, rebuildFromNotes, repoIdentity } from '../crew/lib/ship-queue-train-record';
 
-export { LAND_LOCK_REF } from './ship-queue-land-lock';
+export { LAND_LOCK_REF } from '../crew/lib/ship-queue-land-lock';
 export const MAX_RESTAMPS = 2;
 const MANIFESTS = ['package.json', 'package-lock.json', 'npm-shrinkwrap.json'];
 const isSha = (s: string | undefined) => /^[0-9a-f]{40,64}$/.test(s ?? '');
@@ -212,7 +214,7 @@ function prInfo(ctx: QueueContext, pr: string): PrInfo | QueueFailure {
 export function waitChecks(ctx: QueueContext, sha: string, minutes: number): void {
   const deadline = Date.now() + minutes * 60_000;
   for (let ci = ciAtHead(ctx, sha); !ci.green && !ci.line.startsWith('red') && Date.now() < deadline; ci = ciAtHead(ctx, sha)) {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 30_000);
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, pollDelayMs(MIN_POLL_MS));
   }
 }
 
@@ -301,7 +303,7 @@ function repair(ctx: QueueContext, policy: ShipPolicy, j: LandJournal | null, fi
       pushed = remote[0]!;
       lines.push(`branch: ${branch} already on origin at ${pushed.slice(0, 12)} (an earlier --repair pushed it); opening or finding its PR`);
     }
-    const pr = ctx.gh(['pr', 'create', '--base', ctx.base, '--head', branch, '--title', `Release entry for the merge outside land beside #${j.pr}`, '--body', `QUEUE_LAND_DRIFT repair (docs/troubleshooting.md#queue-land-drift). Outside commits: ${outside.join(', ') || 'unknown'}.`]);
+    const pr = ctx.gh(['pr', 'create', '--base', ctx.base, '--head', branch, '--title', `Add a changelog entry for changes merged by hand next to #${j.pr}`, '--body', `QUEUE_LAND_DRIFT repair (docs/troubleshooting.md#queue-land-drift). Outside commits: ${outside.join(', ') || 'unknown'}.`]);
     const n = /\/pull\/(\d+)/.exec(`${pr.out}\n${pr.err ?? ''}`)?.[1];
     if (!n) return fail(lines, { code: 'QUEUE_NOT_READY', message: `gh pr create failed: ${(pr.err ?? pr.out).trim().slice(0, 160)}` }, run);
     j.repair_pr = n; writeJsonAtomic(file, j);
@@ -346,7 +348,13 @@ export function land(ctx: QueueContext, o: LandOptions): StepOutput {
   if (!policy.changelog_fragments) return fail(lines, { code: 'QUEUE_NOT_READY', message: 'the base policy has changelog_fragments off; land merges only under the key, where ready records the READY receipt it checks' }, run);
   const keys = repoIdentity(root).keys;
   if (!loadReady(keys, o.pr, pin)) rebuildFromNotes(root, ctx.remote ?? 'origin');
-  if (!loadReady(keys, o.pr, pin)) return fail(lines, { code: 'QUEUE_NOT_READY', message: `no READY receipt for #${o.pr} at the pin ${pin.slice(0, 12)}; ready checks the pregate and full_e2e evidence land merges on`, fix: `run gstack-ship-queue ready --pr ${o.pr}` }, run);
+  const readyNote = loadReady(keys, o.pr, pin);
+  if (!readyNote) return fail(lines, { code: 'QUEUE_NOT_READY', message: `no READY receipt for #${o.pr} at the pin ${pin.slice(0, 12)}; ready checks the pregate and full_e2e evidence land merges on`, fix: `run gstack-ship-queue ready --pr ${o.pr}` }, run);
+  if (!mergedResume) {
+    const plan = landPlan({ env: process.env, policyValue: policy.plan_record, record: readyNote.plan, body: info.body ?? '' });
+    if (plan.line) lines.push(plan.line);
+    if (plan.failure) return fail(lines, plan.failure, run);
+  }
   if (!j) {
     const ci = ciAtHead(ctx, pin);
     lines.push(`CI: ${ci.line}`);

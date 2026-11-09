@@ -14,11 +14,16 @@
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { AgentModelError, resolveAgentModel } from './agent-model';
 import { BriefError, briefFile, checkoutRoot, checkoutTree, promptHash, renderBrief, sliceDiff, sliceNote, withWorkspace, type BriefRole, type SectionTexts, type Slots } from './review-brief';
 import { REVIEW_DIFF_MAX_BYTES, disclosureDigest } from './review-exclude';
 import { appendEvent, readerKey } from './review-ledger';
+import { policySelection, selectFor } from './review-selection';
 import { diffCommand, type Dispatch } from './review-depth';
 import { TARGETED_RULES, parseClassList, targetedBriefSha, targetedRead } from './review-targeted';
+import type { FetchHit } from './review-fetch';
+import type { EffectiveReaders } from './ship-policy-readers';
+import type { StageSweep } from './review-sweep';
 
 export const STAGES = ['first', 'specialists', 'red-team', 'voices'] as const;
 export type Stage = typeof STAGES[number];
@@ -35,10 +40,18 @@ export interface PassReader {
   /** The plan's model=cross-family (R65's risk reader or a numbers diff's one reader): the program runs it on the outside voice's model. */
   cross_family?: boolean;
   file?: string; sha256?: string; bytes?: number; chunks?: number; findings_sha256?: string;
-  /** With the base policy's review_exclude_paths active: its `:(top,exclude,glob)` items, shell-quoted (the fixture command's slot), and the kept files' `:(top,literal)` items. */
+  /** The base policy's `:(top,exclude,glob)` items (review_exclude_paths and readers.forbid_paths), shell-quoted (the fixture command's slot), and the kept files' `:(top,literal)` items. */
   policy_exclude?: string; keep?: string[];
+  /** The kept files whose only reason is a secret line (lib/review-secret-excerpt.ts): readers get the excerpt gstack-review-dispatch pass writes once beside the briefs, not the whole files. */
+  excerpt?: string[]; excerpt_file?: { file: string; sha256: string; bytes: number; files: number };
   /** The fingerprint the reader's reply must report: the checkout's HEAD^{tree} and toplevel when its brief was rendered (GST-482). */
   tree?: string | null;
+  /** What the reader fetched, from its own tool calls (gstack-review-dispatch audit-fetch, lib/review-fetch.ts). */
+  fetch_audit?: { policy_digest: string; events: number; events_sha256: string; hits: FetchHit[]; verdict: 'clean' | 'violation'; enforced: boolean };
+  /** A stage rerun after a fetch violation (lib/review-sweep.ts): attempt 2 of the slot, and the reader it replaced points at it. */
+  attempt?: number; superseded_by?: string;
+  /** Set when the stage's sweep found a fetch: the reply's new home under <out>/quarantine/; it is never merged, judged or returned. */
+  quarantined?: { file: string; at: string };
   path?: string; output?: string; error?: string; state_at?: string;
 }
 export interface Manifest {
@@ -52,9 +65,37 @@ export interface Manifest {
   review_exclude?: Record<string, unknown>; disclosure?: string;
   /** Decision 3.5's files for a fix-check reader: the fix list, touched hunks, test results and callers. */
   fix_check?: FixCheckFiles;
+  /** Step 11's own pass (`pass --voices`): the plan's voices only, so nothing is rendered that the voices program never sends. */
+  voices_only?: true;
+  /** The plan's readers policy (lib/review-fetch.ts): what every brief says readers may not fetch or open; absent means the default rule. */
+  fetch_policy?: EffectiveReaders;
+  /** Each stage's fetch sweep (gstack-review-dispatch sweep): the start inventory, then the end verdict. */
+  sweeps?: Partial<Record<Stage, StageSweep>>;
 }
 export interface FixCheckFiles { fix_list: string; hunks: string; tests: string; callers?: string }
 export interface Extra { name: string; prompt_file: string; first?: boolean; model?: PassModel }
+/** The audit readers' model when no preference is set (their pre-GST-1439 hard-code). */
+export const AUDIT_DEFAULT: PassModel = { model_id: 'anthropic/claude-sonnet-5-5', reasoning_mode: 'low' };
+
+/** The model an audit extra (Steps 7, 8, 14.5) runs on when it names none (GST-1439, GST-1449): the owner's agent_model at low effort,
+ * AUDIT_DEFAULT with no preference or an unusable one; agent_model host leaves it to the lane's own model. */
+export function auditModel(env: NodeJS.ProcessEnv = process.env): { model?: PassModel; line: string } {
+  const fallback = (why: string) => ({ model: AUDIT_DEFAULT, line: `AUDIT_MODEL: ${AUDIT_DEFAULT.model_id} reasoning=low (default; ${why})` });
+  let s;
+  try { s = resolveAgentModel({ env }); } catch (error) {
+    if (!(error instanceof AgentModelError)) throw error;
+    return fallback(`${error.problem}, ignored`);
+  }
+  if (s.source.kind === 'default') return fallback('no agent_model set');
+  if (!s.id) return { line: `AUDIT_MODEL: host (agent_model host in ${s.source.path}: the lane's own model)` };
+  return { model: { model_id: s.id, reasoning_mode: 'low' }, line: `AUDIT_MODEL: ${s.id} reasoning=low (agent_model ${s.value} in ${s.source.path})` };
+}
+
+/** Fills auditModel() into the extras that name no model, and the AUDIT_MODEL: line for the plan when any did. */
+export function withAuditModel(given: Extra[], env: NodeJS.ProcessEnv = process.env): { extras: Extra[]; lines: string[] } {
+  const audit = given.some(e => !e.model) ? auditModel(env) : null;
+  return { extras: given.map(e => (e.model || !audit?.model ? e : { ...e, model: audit.model })), lines: audit ? [audit.line] : [] };
+}
 /** Step 9.2.1's own first line: its probes are the parent's, so a QA subagent only refuses (C4-36, C5-36: "parent-only"). */
 export const PARENT_ONLY_QA = 'Only the parent runs report-only discovery.';
 const qaRefusal = (name: string) => new BriefError(`Step 9.2.1 is the parent's report-only discovery (ship/sections/review-army.md: "${PARENT_ONLY_QA}"), never an audit reader: ${name}`);
@@ -87,24 +128,30 @@ const shellQuote = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
 const safe = (reader: string) => reader.replace(/[^a-zA-Z0-9._-]/g, '_');
 const STAGE_OF: Record<string, Stage> = { specialist: 'specialists', 'fix-check': 'specialists', 'red-team': 'red-team', 'adversarial-native': 'voices', 'outside-voice': 'voices', targeted: 'voices' };
 
-/** The manifest for one pass from the plan's dispatches. A fix-check reader needs decision 3.5's files. */
+/** The manifest for one pass from the plan's dispatches. A fix-check reader needs decision 3.5's files. `voices` keeps only Step 11's readers. */
 export function buildManifest(o: {
   pass: string; out: string; ledger: string; base: string; diffBase: string; root: string; checklistRoot: string;
-  dispatches: Dispatch[]; next: string; planLines: string[]; learnings?: string | null; extras?: Extra[];
-  targetedClasses?: readonly string[]; mergeBase?: string; rangeBase?: string; fixCheck?: FixCheckFiles; reviewExclude?: Record<string, unknown>; disclosure?: string;
+  dispatches: Array<Dispatch & { excerpt?: string[] }>; next: string; planLines: string[]; learnings?: string | null; extras?: Extra[];
+  targetedClasses?: readonly string[]; mergeBase?: string; rangeBase?: string; fixCheck?: FixCheckFiles; reviewExclude?: Record<string, unknown>; disclosure?: string; readers?: EffectiveReaders; voices?: boolean;
 }): Manifest {
+  if (o.voices && o.extras?.length) throw new BriefError(`Step 11's voices pass sends no audit reader, so it takes no --extras: ${o.extras.map(e => e.name).join(', ')}`);
   const readers: PassReader[] = [];
-  for (const d of o.dispatches) {
+  const selection = policySelection(o.reviewExclude, o.readers);
+  for (const planned of o.dispatches) {
+    const d = planned.role === 'fix-check' ? planned : selectFor(planned, selection);
     const stage = STAGE_OF[d.role];
     if (!stage) throw new BriefError(`a pass dispatches no ${d.role} reader`);
+    if (o.voices && stage !== 'voices') continue;
     if (d.role === 'fix-check' && !o.fixCheck) throw new BriefError('the plan dispatches a fix-check: pass needs --fix-list, --hunks and --tests (decision 3.5\'s files; --callers optional)');
     const role: BriefRole = d.role === 'specialist' && d.checklists ? 'specialist-batched' : d.role as BriefRole;
     const name = role === 'specialist' ? d.name : undefined;
     const reader = readerKey(role, name);
     const exclude = d.exclude.length ? diffCommand(d).slice('git diff <diff-base> '.length) : undefined;
     const policy = d.exclude.filter(s => s.startsWith(':(top,exclude,glob)'));
+    const excerpt = (d.excerpt ?? []).filter(s => d.keep?.includes(s));
+    const keep = (d.keep ?? []).filter(s => !excerpt.includes(s));
     readers.push({ reader, stage, title: `ship ${o.pass} ${reader}`, state: 'planned', role, name, effort: d.effort, exclude, checklists: d.checklists,
-      ...(policy.length ? { policy_exclude: policy.map(shellQuote).join(' ') } : {}), ...(d.keep?.length ? { keep: d.keep } : {}),
+      ...(policy.length ? { policy_exclude: policy.map(shellQuote).join(' ') } : {}), ...(keep.length ? { keep } : {}), ...(excerpt.length ? { excerpt } : {}),
       ...(role === 'targeted' ? { classes: [...(o.targetedClasses ?? [])], diff_base: o.mergeBase ?? o.diffBase } : {}),
       ...(role === 'adversarial-native' && d.classes?.length ? { classes: [...d.classes], diff_base: o.mergeBase ?? o.diffBase } : {}),
       ...(d.model === 'cross-family' ? { cross_family: true } : d.model && d.model !== 'lane' ? { model: { model_id: d.model } } : {}),
@@ -122,7 +169,7 @@ export function buildManifest(o: {
   return {
     version: 1, pass: o.pass, out, ledger: path.resolve(o.ledger), merged: path.join(out, 'merged.jsonl'), base: o.base, diff_base: o.diffBase,
     stack: detectStack(o.root), test_fw: detectTestFw(o.root), learnings: o.learnings ?? null, checklist_root: o.checklistRoot,
-    next: o.next, plan_lines: o.planLines, readers, ...(o.reviewExclude ? { review_exclude: o.reviewExclude } : {}), ...(o.disclosure ? { disclosure: o.disclosure } : {}),
+    next: o.next, plan_lines: o.planLines, readers, ...(o.voices ? { voices_only: true as const } : {}), ...(o.reviewExclude ? { review_exclude: o.reviewExclude } : {}), ...(o.disclosure ? { disclosure: o.disclosure } : {}), ...(o.readers ? { fetch_policy: o.readers } : {}),
     ...(o.fixCheck ? { fix_check: Object.fromEntries(Object.entries(o.fixCheck).filter(([, v]) => v).map(([k, v]) => [k, path.resolve(v as string)])) as unknown as FixCheckFiles } : {}),
   };
 }
@@ -161,7 +208,7 @@ export function renderStage(m: Manifest, stage: Stage, t: SectionTexts, diffFor:
   for (const r of m.readers.filter(x => x.stage === stage && x.state === 'planned')) {
     if (r.prompt_file) {
       let text: string;
-      try { text = withWorkspace(fs.readFileSync(r.prompt_file, 'utf8'), workdir); } catch { throw new BriefError(`cannot read ${r.reader}'s prompt file ${r.prompt_file}`); }
+      try { text = withWorkspace(fs.readFileSync(r.prompt_file, 'utf8'), workdir, m.fetch_policy); } catch { throw new BriefError(`cannot read ${r.reader}'s prompt file ${r.prompt_file}`); }
       const file = path.join(briefs, `${safe(r.reader)}.prompt.md`);
       fs.writeFileSync(file, text, { mode: 0o600 });
       Object.assign(r, { file, sha256: promptHash(text), bytes: Buffer.byteLength(text), chunks: chunkCount(text), state: 'rendered', tree });
@@ -171,7 +218,8 @@ export function renderStage(m: Manifest, stage: Stage, t: SectionTexts, diffFor:
     const role = r.role!;
     const slots: Slots = { name: r.name, diff_base: r.diff_base ?? m.diff_base, exclude: r.exclude, stack: m.stack, test_fw: m.test_fw, learnings: m.learnings ?? undefined,
       checklists: r.checklists?.map(n => path.join(m.checklist_root, 'review/specialists', `${n}.md`)).join(','),
-      ...(m.disclosure ? { disclosure: m.disclosure, policy_exclude: r.policy_exclude, keep: r.keep?.map(shellQuote).join(' ') } : {}) };
+      policy_exclude: r.policy_exclude, ...(m.disclosure ? { disclosure: m.disclosure, keep: r.keep?.map(shellQuote).join(' ') } : {}),
+      ...(m.disclosure && r.excerpt_file ? { excerpt_file: r.excerpt_file.file, excerpt_bytes: String(r.excerpt_file.bytes), excerpt_sha256: r.excerpt_file.sha256, excerpt_files: String(r.excerpt_file.files) } : {}) };
     if (role === 'specialist') slots.checklist = path.join(m.checklist_root, 'review/specialists', `${r.name}.md`);
     let findingsSha: string | undefined;
     if (role === 'red-team') {
@@ -202,12 +250,12 @@ export function renderStage(m: Manifest, stage: Stage, t: SectionTexts, diffFor:
       Object.assign(slots, { checklist, brief, classes: (r.classes ?? []).join(','), diff_base: r.diff_base ?? m.diff_base });
       targeted = { classes: parseClassList(slots.classes!), rules: TARGETED_RULES, brief_sha: targetedBriefSha(checklist), diff_base: slots.diff_base, ...targetedRead(process.cwd(), slots.diff_base!) };
     }
-    const text = withWorkspace(renderBrief(role, slots, t), workdir);
+    const text = withWorkspace(renderBrief(role, slots, t), workdir, m.fetch_policy);
     const file = path.join(briefs, briefFile(role, r.name));
     fs.writeFileSync(file, text, { mode: 0o600 });
     const sha = promptHash(text);
     const bytes = Buffer.byteLength(text);
-    appendEvent(m.ledger, { event: 'rendered', reader: r.reader, role, name: r.name ?? null, file, sha256: sha, bytes, pass: m.pass, stage, workdir, tree, ...(findingsSha ? { findings_sha256: findingsSha } : {}), ...targeted, ...slice, ...(disclosureDigest(m.disclosure) ? { exclude: disclosureDigest(m.disclosure) } : {}) });
+    appendEvent(m.ledger, { event: 'rendered', reader: readerKey(role, r.name), role, name: r.name ?? null, file, sha256: sha, bytes, pass: m.pass, stage, workdir, tree, ...(findingsSha ? { findings_sha256: findingsSha } : {}), ...targeted, ...slice, ...(disclosureDigest(m.disclosure) ? { exclude: disclosureDigest(m.disclosure) } : {}), ...(m.fetch_policy ? { readers: m.fetch_policy.digest } : {}) });
     Object.assign(r, { file, sha256: sha, bytes, chunks: chunkCount(text), state: 'rendered', tree, ...(findingsSha ? { findings_sha256: findingsSha } : {}) });
     done.push(r);
   }

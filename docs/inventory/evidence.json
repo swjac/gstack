@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "note": "R56 evidence ledger (ETHOS.md: 9. Earn Its Place). One row per inventory key (docs/inventory.md lists them); bin/gstack-inventory --check validates it and test/inventory.test.ts runs that check. Statuses and their required fields: helps, no-effect, hurts need sources, models (frontier per R54), prompt: preset, scope and masked: true, and no-effect and hurts also r48 {verdict, ref}; untested needs plan (a reference, or none only when grandfathered), and a new part also reason, owner and measure_by; safety needs reason. prior lists earlier results that do not count yet, with why. Seeded 2026-11-02 from GEVA-2's table (org-gstack-gbrain/research/gstack-part-evidence.json, gstack dac71371a); every row present at that base is grandfathered.",
+  "note": "R56 evidence ledger (ETHOS.md: 9. Earn Its Place). One row per inventory key (docs/inventory.md lists them); bin/gstack-inventory --check validates it and test/inventory.test.ts runs that check. Statuses and their required fields: helps, no-effect, hurts need sources, models (frontier per R54), prompt: preset, scope and masked: true, and no-effect and hurts also r48 {verdict, ref}; caveats lists a verdict's limits, shown beside its status; untested needs plan (a reference, or none only when grandfathered), and a new part also reason, owner and measure_by; safety needs reason. prior lists earlier results that do not count yet, with why. Seeded 2026-11-02 from GEVA-2's table (org-gstack-gbrain/research/gstack-part-evidence.json, gstack dac71371a); every row present at that base is grandfathered.",
   "seed_source": "org-gstack-gbrain/research/gstack-part-evidence.json (GEVA-156 for GST-915, 2026-11-02, gstack-evals main 409ff47)",
   "parts": {
     "autoplan": {
@@ -176,62 +176,6 @@
       "grandfathered": true,
       "plan": "none",
       "seed": "GEVA-2, 2026-11-02: health: untested (never measured)"
-    },
-    "investigate": {
-      "status": "no-effect",
-      "grandfathered": true,
-      "sources": [
-        "GST-814 (HARN-1, 2026-11-02)",
-        "org-gstack-gbrain handoffs/HARN-14/hard-follow-2026-11/decision-rule.md"
-      ],
-      "models": [
-        "claude-opus-5-5"
-      ],
-      "prompt": "preset",
-      "scope": "skill step procedure follow rate: 0 of 46 gstack sessions ran any step (0 of 30 on the claude_code preset); body loaded every time; the outcome check voided at ceiling (no-gstack fixed 8 of 8)",
-      "masked": true,
-      "r48": {
-        "verdict": "CUT-CANDIDATE",
-        "ref": "GST-938 (GSTA-251 plans hooks-or-drop)"
-      },
-      "plan": "R3 (GEVA-2, 2026-11-02): gstack-evals wiki/plans/2026-11-01-geva-101-r48-follow-ups-prereg (#112, main f0b81c0) and its amendment (open PR #133), told /investigate vs no gstack on SWE-bench Verified, preset, Opus 5.5 then GPT-6.1 Sol",
-      "prior": [
-        {
-          "ref": "gstack-evals #109 stacks round 1 TB2 (GEVA-89, GEVA-93), wiki/board/2026-11-01-geva-93-stacks-round-1-tb2-results",
-          "why": [
-            "stub",
-            "no-exposure",
-            "unmasked"
-          ],
-          "note": "Opus +3 points [-3, +9] at 1.9x cost; debug report in 0 of 111 trials; particle-1 -5 [-14, +1]"
-        },
-        {
-          "ref": "GSTA-12 Lane B quick look 2, wiki/board/2026-10-29-gsta-12-laneb-quick-2-results",
-          "why": [
-            "stub",
-            "unmasked"
-          ],
-          "note": "Opus gstack minus none -7 [-13, -2] at 1.7x cost; did not replicate"
-        },
-        {
-          "ref": "GSTA-30 Lane B quick look 3 (#89), wiki/board/2026-10-30-gsta-30-laneb-quick-3-results",
-          "why": [
-            "stub",
-            "small-tier"
-          ],
-          "note": "gstack arms on Sonnet, particle-1, DeepSeek and Haiku; Opus ran the none arm only"
-        },
-        {
-          "ref": "HARN-14 replication (harness-evals #181, unmerged)",
-          "why": [
-            "stub",
-            "small-tier"
-          ],
-          "note": "Haiku 5.5: gstack minus none +3.5 [-12.3, +20.0]"
-        }
-      ],
-      "seed": "GEVA-2, 2026-11-02: investigate: measurement under way (R3)",
-      "note": "Only Opus 5.5 (claude-opus-5-5) was measured; GPT-6.1 Sol was not, so this verdict covers one of the two frontier models ETHOS.md 9 names."
     },
     "ios-clean": {
       "status": "untested",
@@ -420,9 +364,27 @@
       "seed": "GEVA-2, 2026-11-02: retro: untested (never measured)"
     },
     "review": {
-      "status": "untested",
+      "status": "helps",
       "grandfathered": true,
-      "plan": "R2 (GEVA-2, 2026-11-02): gstack-evals wiki/plans/2026-11-02-geva-122-r2-amendment (#129, main eae6efc), told /review vs a no-gstack arm, Opus 5.5, preset on both arms",
+      "sources": [
+        "gstack-evals #207 (baa599a9) wiki/board/2026-11-04-geva-271-r2-after-pin-results",
+        "gstack-evals #211 (81daa79) wiki/board/2026-11-04-geva-281-r2-after-pin-results-home-field"
+      ],
+      "models": [
+        "claude-opus-5-5"
+      ],
+      "prompt": "preset",
+      "scope": "/review as a Claude Code user installs it at gstack 699a41cb (./setup --host claude), contract Stop hook included, told /review, against plain Opus 5.5 with no gstack; Claude Code CLI 2.1.314 on the claude_code preset; stacks-r1, 33 units, 42 blocking bugs, 2 passes: blocking recall 22/84 (26.2%) vs 3/84 (3.6%), +22.6 points [95% PR-clustered CI +11.0, +33.7], MDD 24.5",
+      "masked": true,
+      "r48": {
+        "verdict": "KEEP",
+        "ref": "gstack-evals #211, wiki/board/2026-11-04-geva-281-r2-after-pin-results-home-field (What we found: R48 KEEP, rr-decide.py KEEP)"
+      },
+      "caveats": [
+        "one unit: /review and the contract Stop hook were measured together, and neither gets credit alone; 42 of 66 gstack sessions ran the review readers only after the hook blocked them (24 unprompted), and that split is not randomized",
+        "home-field bias in gstack's favor: 41 of the 42 blocking bugs in stacks-r1 came from gstack-family reviews, so +22.6 may run high; a suite seeded from other reviewers' bugs would remove the bias (GEVA-2 lists it as future work)",
+        "development suite: stacks-r1 is a development suite, so the result makes no release claim and holds only for these 33 units at these settings"
+      ],
       "prior": [
         {
           "ref": "gstack-evals #108 stacks round 1 review (GEVA-89), wiki/board/2026-11-01-geva-89-stacks-round-1-review-results",
@@ -450,11 +412,8 @@
           "note": "/review's prompts through the Messages API; Opus recall 44% vs 39% plain, 12 bugs"
         }
       ],
-      "r48": {
-        "verdict": "FIX-METHOD",
-        "ref": "org-gstack-gbrain/research/why-null-stacks-r1.md (GEVA-100); R2 is the fix"
-      },
-      "seed": "GEVA-2, 2026-11-02: review: measurement under way (R2)"
+      "seed": "GEVA-2, 2026-11-02: review: measurement under way (R2)",
+      "note": "R2 at the after pin: GEVA-271 under prereg #194 (amending #154), runs review-units-20261104T070239Z-cbff (gstack-full) and review-units-20261104T123631Z-3fb3 (none-rr); #211 (GEVA-281) supersedes #207's post with every number unchanged and adds the home-field limit. Until then, this row was untested with R48 FIX-METHOD (org-gstack-gbrain/research/why-null-stacks-r1.md, GEVA-100), plan R2 (gstack-evals #129). R2's first two attempts gave no outcome: GEVA-175 (procedure gate 10 of 19) and GEVA-229 (exposure smoke 2 of 3). masked: the no-gstack arm ran in the rig's Docker sandbox with no gstack install, and #207's read audit of its 66 transcripts found no read of ~/.capy/drive or ~/.local/share/gstack. Only Opus 5.5 was measured; GPT-6.1 Sol was not."
     },
     "scrape": {
       "status": "untested",
@@ -582,7 +541,8 @@
       "seed": "GEVA-2, 2026-11-02: always-on skill catalog (descriptions): measurement under way (Run D)",
       "aliases": [
         "always-on skill catalog (descriptions)"
-      ]
+      ],
+      "note": "L1 (GEVA-2, gstack-evals#247, merged 28be250; Opus 5.5, claude_code preset, 80 SWE-rebench tasks, pins 82db89ab → 699a41cb): the description rewrite alone had no effect (off-u, routing and contracts off with the rewritten descriptions kept: 0/80 untold /investigate opens). The rewrite helps only inside the untold routing package; see the investigate row's caveats and this ledger's unmapped rows."
     },
     "capy-skill": {
       "status": "untested",
@@ -663,6 +623,10 @@
     {
       "row": "gstack as a whole (installed, any skill)",
       "why": "not a single text part; GEVA-2's real-world outcome lane measures it (gstack-evals plan #111), not a measurement plan for any one part"
+    },
+    {
+      "row": "untold routing package (route hook, contracts and the description rewrite)",
+      "why": "two Claude Code hooks and four description lines, not one text part with a key. L1 (GEVA-2, gstack-evals#247, merged 28be250; Opus 5.5, claude_code preset, 80 SWE-rebench tasks, no-gstack arm, pins 82db89ab → 699a41cb): helps, untold /investigate opens 17/80 vs 0/80, B1 +21.3 [+12.5, +30.0], R48 KEEP; it needs routing or contracts on, and hook vs contracts aren't split; the description rewrite alone had no effect (off-u 0/80). The investigate row carries it as a caveat"
     }
   ]
 }

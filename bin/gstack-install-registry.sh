@@ -339,3 +339,29 @@ gstack_disabled_normalize() {
   done
   printf '%s' "$out"
 }
+
+# GSTACK_RETIRED_SKILLS — skills gstack keeps off every host whatever
+# disabled_skills says; an existing gstack-owned entry is removed like a
+# disabled one. plan-eng-review's source stays as /autoplan's eng-phase
+# methodology (GST-1698); investigate's source is gone (GST-1717), and its old
+# entries are still removed. Same list as RETIRED_SKILLS in
+# scripts/discover-skills.ts (test/retired-skills.test.ts).
+GSTACK_RETIRED_SKILLS="plan-eng-review investigate"
+
+# GSTACK_CREW_SKILLS — the gstack-on-Capy skills (crew/README.md). Only a Capy
+# machine registers them; anywhere else they get no entry on any host and an
+# existing gstack-owned entry is removed, like a retired skill. Same list as
+# CREW_SKILLS in scripts/discover-skills.ts (test/crew-skills-on-capy.test.ts).
+GSTACK_CREW_SKILLS="captain"
+
+# gstack_on_capy — true wherever Capy has run: CAPY_MACHINE_CONFIG set (cloud
+# machines), or any ~/.capy entry. A paired device (a Mac running Capy) has no
+# CAPY_MACHINE_CONFIG but has ~/.capy/system and ~/.capy/device. Any ~/.capy
+# counts, so an unclear case installs the crew skills rather than dropping
+# /captain for a Capy user.
+gstack_on_capy() { [ -n "${CAPY_MACHINE_CONFIG:-}" ] || [ -e "${HOME:-/nonexistent}/.capy" ]; }
+
+# GSTACK_UNREGISTERED_SKILLS — what setup and gstack-relink keep off every host
+# on this machine: the retired skills, plus the crew skills off Capy.
+GSTACK_UNREGISTERED_SKILLS="$GSTACK_RETIRED_SKILLS"
+gstack_on_capy || GSTACK_UNREGISTERED_SKILLS="$GSTACK_RETIRED_SKILLS $GSTACK_CREW_SKILLS"
