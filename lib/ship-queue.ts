@@ -41,7 +41,7 @@ import {
   type AttemptRecord, type QueueFailure,
 } from '../crew/lib/ship-queue-gate';
 import { wtreeFingerprint } from './script-invocation';
-import { nowIso, persist, readyPath, repoIdentity } from '../crew/lib/ship-queue-train-record';
+import { nowIso, persist, readyNoteUnpushed, readyPath, repoIdentity } from '../crew/lib/ship-queue-train-record';
 import { buildReceipt, type TreeReceipt } from './tree-receipt';
 
 export type Gh = (args: string[]) => { ok: boolean; out: string; err?: string };
@@ -107,10 +107,10 @@ const CI_PAGE = 100;
 const CI_MAX_PAGES = 10;
 
 /** Every page of one GitHub list for a commit; anything short of exactly total_count is an error, never a partial answer. */
-function readAllPages(ctx: QueueContext, endpoint: string, key: 'check_runs' | 'statuses'): { items: Array<Record<string, unknown>> } | { error: string } {
+function readAllPages(ctx: QueueContext, endpoint: string, key: 'check_runs' | 'statuses' | 'workflow_runs'): { items: Array<Record<string, unknown>> } | { error: string } {
   const items: Array<Record<string, unknown>> = [];
   for (let page = 1; page <= CI_MAX_PAGES; page++) {
-    const r = ctx.gh(['api', `${endpoint}?per_page=${CI_PAGE}&page=${page}`]);
+    const r = ctx.gh(['api', `${endpoint}${endpoint.includes('?') ? '&' : '?'}per_page=${CI_PAGE}&page=${page}`]);
     let body: { total_count?: unknown; [k: string]: unknown } | null = null;
     try { body = r.ok ? JSON.parse(r.out) : null; } catch {}
     const list = body?.[key];
@@ -134,29 +134,97 @@ function readAllPages(ctx: QueueContext, endpoint: string, key: 'check_runs' | '
  * completed run with no readable completed_at, is never collapsed and counts on
  * its own (fail closed).
  */
-export function latestRunPerName<T extends { name?: unknown; id?: unknown; status?: unknown; completed_at?: unknown; app?: unknown }>(runs: T[]): T[] {
+type CheckRun = { name?: unknown; id?: unknown; status?: unknown; completed_at?: unknown; app?: unknown };
+const runRank = (r: CheckRun) => (r.status !== 'completed' ? Infinity : typeof r.completed_at === 'string' ? Date.parse(r.completed_at) : NaN);
+/** One app's check name, or null for a run that is never collapsed (no name, or completed with no readable completed_at). */
+function checkKey(r: CheckRun): string | null {
+  if (typeof r.name !== 'string' || !r.name || Number.isNaN(runRank(r))) return null;
+  const app = (r.app as { id?: unknown } | null | undefined)?.id;
+  return `${typeof app === 'number' || typeof app === 'string' ? app : ''}\0${r.name}`;
+}
+
+export function latestRunPerName<T extends CheckRun>(runs: T[]): T[] {
   const latest = new Map<string, T>();
   const standalone: T[] = [];
-  const rank = (r: T) => (r.status !== 'completed' ? Infinity : typeof r.completed_at === 'string' ? Date.parse(r.completed_at) : NaN);
   const id = (r: T) => (typeof r.id === 'number' ? r.id : Number(r.id) || 0);
   for (const r of runs) {
-    const app = (r.app as { id?: unknown } | null | undefined)?.id;
-    if (typeof r.name !== 'string' || !r.name || Number.isNaN(rank(r))) { standalone.push(r); continue; }
-    const key = `${typeof app === 'number' || typeof app === 'string' ? app : ''}\0${r.name}`;
+    const key = checkKey(r);
+    if (key === null) { standalone.push(r); continue; }
     const have = latest.get(key);
-    if (!have || rank(r) > rank(have) || (rank(r) === rank(have) && id(r) > id(have))) latest.set(key, r);
+    if (!have || runRank(r) > runRank(have) || (runRank(r) === runRank(have) && id(r) > id(have))) latest.set(key, r);
   }
   return [...latest.values(), ...standalone];
 }
 
-/** CI at one exact SHA: the latest check run per name (as GitHub's rollup counts) and every commit-status context; unreadable or incomplete is unknown, never green. */
-export function ciAtHead(ctx: QueueContext, sha: string): { line: string; green: boolean; none: boolean; checks: Array<{ name: string; status: string; conclusion: string | null }>; contexts: Array<{ name: string; state: string }> } {
+const suiteOf = (r: Record<string, unknown>) => String((r.check_suite as { id?: unknown } | null | undefined)?.id ?? '');
+const PASSING = ['success', 'skipped', 'neutral'];
+
+/**
+ * A CI_SUPERSEDED line for each red run whose check counts by a passing newer run from another check suite, such as a
+ * branch-only dispatch that replaced a red pull_request run, which tested the merge with the base (reports/GSTA-461.md
+ * item 7). It only warns: the verdict is latestRunPerName's. A rerun in the same suite prints nothing.
+ */
+function supersededLines(runs: Array<Record<string, unknown>>, judged: Array<Record<string, unknown>>): string[] {
+  const winners = new Map(judged.map(r => [checkKey(r), r] as const).filter(([k]) => k !== null));
+  return runs.flatMap(r => {
+    const key = checkKey(r);
+    const by = key === null ? undefined : winners.get(key);
+    if (!by || by === r || r.status !== 'completed' || PASSING.includes(String(r.conclusion))) return [];
+    if (by.status !== 'completed' || !PASSING.includes(String(by.conclusion)) || suiteOf(r) === suiteOf(by)) return [];
+    return [`CI_SUPERSEDED: ${String(r.name)} red run ${String(r.id ?? '?')} replaced by ${String(by.id ?? '?')} (suite ${suiteOf(r) || '?'} → ${suiteOf(by) || '?'})`];
+  });
+}
+
+/**
+ * Workflow runs at a head that ended without a passing conclusion and without one check run (a startup_failure, or a
+ * run that failed before scheduling a job), so the check-runs list never names them. Each counts as its own failed
+ * check unless a later run of the same workflow at this head replaced it; that run's own checks then count (Plain
+ * title on #4225 failed with no jobs and passed two minutes later; gstack-evals#303's second sealed run had no later one).
+ * A later run replaces it only once that run has check runs or has finished; while it is still queued with no jobs the
+ * failure still counts. A run cancelled before any job never ran: a concurrency group cancels a pending run when a newer
+ * one at another SHA arrives (the main backstop at 526f604f911e), so it is not counted. "Has jobs" means its suite is in
+ * latestSuites (its latest attempt ran jobs), so a passing first attempt never hides a rerun that failed with no jobs; a
+ * suite whose earlier-attempt runs already count a failure (judged) adds no second entry.
+ */
+export function joblessRuns(latestSuites: Set<string>, judged: Array<Record<string, unknown>>, workflowRuns: Array<Record<string, unknown>>): Array<{ name: string; status: string; conclusion: string | null }> {
+  const failedSuites = new Set(judged.filter(r => r.status === 'completed' && !['success', 'skipped', 'neutral'].includes(String(r.conclusion))).map(suiteOf).filter(Boolean));
+  const workflow = (w: Record<string, unknown>) => String(w.workflow_id ?? w.path ?? '');
+  const order = (w: Record<string, unknown>) => [Date.parse(String(w.created_at ?? '')) || 0, Number(w.id) || 0] as const;
+  const newer = (a: Record<string, unknown>, b: Record<string, unknown>) => order(a)[0] > order(b)[0] || (order(a)[0] === order(b)[0] && order(a)[1] > order(b)[1]);
+  const started = (w: Record<string, unknown>) => latestSuites.has(String(w.check_suite_id ?? ''));
+  const replaces = (o: Record<string, unknown>, w: Record<string, unknown>) => o !== w && workflow(o) === workflow(w) && newer(o, w) && (started(o) || (o.status === 'completed' && o.conclusion !== 'cancelled'));
+  return workflowRuns
+    .filter(w => w.status === 'completed' && !['success', 'skipped', 'neutral', 'cancelled'].includes(String(w.conclusion)) && !started(w) && !failedSuites.has(String(w.check_suite_id ?? '')))
+    .filter(w => !workflow(w) || !workflowRuns.some(o => replaces(o, w)))
+    .map(w => ({ name: `${String(w.name ?? w.path ?? 'workflow')} (run ${String(w.id ?? '?')}, no jobs)`, status: 'completed', conclusion: w.conclusion === undefined || w.conclusion === null ? null : String(w.conclusion) }));
+}
+
+/**
+ * CI at one exact SHA: the latest check run per name, every workflow run that ended with no jobs (joblessRuns), and
+ * every commit-status context; unreadable or incomplete is unknown, never green. Check runs are read twice: GitHub's
+ * default (filter=latest) lists only each check suite's latest attempt, so a rerun attempt that created no jobs hides the
+ * failed run before it (gstack-evals#303), and GitHub's own rollup drops it the same way. A suite the latest list names is
+ * judged by that list alone, so a rerun whose matrix dropped a failed job retires it; a suite only filter=all names (its
+ * latest attempt had no jobs) is judged by its earlier attempts. latestRunPerName then picks the newest run per name.
+ */
+export function ciAtHead(ctx: QueueContext, sha: string): { line: string; green: boolean; none: boolean; checks: Array<{ name: string; status: string; conclusion: string | null }>; contexts: Array<{ name: string; state: string }>; superseded: string[] } {
   const at = sha.slice(0, 12);
-  const runs = readAllPages(ctx, `repos/{owner}/{repo}/commits/${sha}/check-runs`, 'check_runs');
-  if ('error' in runs) return { line: `unknown at ${at} (${runs.error})`, green: false, none: false, checks: [], contexts: [] };
+  const latest = readAllPages(ctx, `repos/{owner}/{repo}/commits/${sha}/check-runs`, 'check_runs');
+  if ('error' in latest) return { line: `unknown at ${at} (${latest.error})`, green: false, none: false, checks: [], contexts: [], superseded: [] };
+  const all = readAllPages(ctx, `repos/{owner}/{repo}/commits/${sha}/check-runs?filter=all`, 'check_runs');
+  if ('error' in all) return { line: `unknown at ${at} (${all.error})`, green: false, none: false, checks: [], contexts: [], superseded: [] };
   const statuses = readAllPages(ctx, `repos/{owner}/{repo}/commits/${sha}/status`, 'statuses');
-  if ('error' in statuses) return { line: `unknown at ${at} (${statuses.error})`, green: false, none: false, checks: [], contexts: [] };
-  const checks = latestRunPerName(runs.items).map(c => ({ name: String(c.name ?? ''), status: String(c.status ?? ''), conclusion: c.conclusion === undefined || c.conclusion === null ? null : String(c.conclusion) }));
+  if ('error' in statuses) return { line: `unknown at ${at} (${statuses.error})`, green: false, none: false, checks: [], contexts: [], superseded: [] };
+  const workflowRuns = readAllPages(ctx, `repos/{owner}/{repo}/actions/runs?head_sha=${sha}`, 'workflow_runs');
+  if ('error' in workflowRuns) return { line: `unknown at ${at} (${workflowRuns.error})`, green: false, none: false, checks: [], contexts: [], superseded: [] };
+  const latestSuites = new Set(latest.items.map(suiteOf).filter(Boolean));
+  const latestIds = new Set(latest.items.map(r => String(r.id ?? '')).filter(Boolean));
+  const candidates = [...latest.items, ...all.items.filter(r => suiteOf(r) ? !latestSuites.has(suiteOf(r)) : !!r.id && !latestIds.has(String(r.id)))];
+  const judged = latestRunPerName(candidates);
+  const checks = [
+    ...judged.map(c => ({ name: String(c.name ?? ''), status: String(c.status ?? ''), conclusion: c.conclusion === undefined || c.conclusion === null ? null : String(c.conclusion) })),
+    ...joblessRuns(latestSuites, judged, workflowRuns.items),
+  ];
   const verdicts = [
     ...checks.map(c => c.status !== 'completed' ? 'pending' : c.conclusion === 'success' ? 'passed' : c.conclusion === 'skipped' || c.conclusion === 'neutral' ? 'skipped' : 'failed'),
     ...statuses.items.map(s => s.state === 'success' ? 'passed' : s.state === 'pending' ? 'pending' : 'failed'),
@@ -164,7 +232,7 @@ export function ciAtHead(ctx: QueueContext, sha: string): { line: string; green:
   const count = (v: string) => verdicts.filter(x => x === v).length;
   const [passed, failed, pending, skipped] = [count('passed'), count('failed'), count('pending'), count('skipped')];
   const green = verdicts.length > 0 && pending === 0 && failed === 0;
-  return { line: `${green ? 'green' : pending ? 'pending' : verdicts.length ? 'red' : 'none'} at ${at} (passed=${passed} failed=${failed} pending=${pending} skipped=${skipped})`, green, none: verdicts.length === 0, checks, contexts: statuses.items.map(s => ({ name: String(s.context ?? ''), state: String(s.state ?? '') })) };
+  return { line: `${green ? 'green' : pending ? 'pending' : verdicts.length ? 'red' : 'none'} at ${at} (passed=${passed} failed=${failed} pending=${pending} skipped=${skipped})`, green, none: verdicts.length === 0, checks, contexts: statuses.items.map(s => ({ name: String(s.context ?? ''), state: String(s.state ?? '') })), superseded: supersededLines(candidates, judged) };
 }
 
 /**
@@ -213,9 +281,21 @@ function gateLine(policy: LoadedPolicy, attempt: AttemptRecord | null): string {
   return `gate: command=${p.gate_command ? JSON.stringify(p.gate_command) : 'none'} full_e2e=${p.full_e2e ? 'yes' : 'no'} gate-ahead=${rec}`;
 }
 
+/**
+ * Refresh origin/<base>: ready reads the base policy (which also picks the train or plain path) and binds the receipt
+ * against the current base, never a ref it did not refresh.
+ */
+export function refreshBase(ctx: QueueContext): QueueFailure | null {
+  const fetched = git(ctx.repoRoot, ['fetch', '--no-tags', '-q', 'origin', `+refs/heads/${ctx.base}:refs/remotes/origin/${ctx.base}`]);
+  if (fetched.ok) return null;
+  return { code: 'QUEUE_BASE_UNFETCHED', message: `cannot fetch origin/${ctx.base} (${fetched.err.trim().split('\n')[0]?.slice(0, 200) ?? ''}); ready reads the policy and checks the receipt against the current base, never a ref it did not refresh`, fix: `fix the fetch (git fetch origin ${ctx.base}), then rerun ready` };
+}
+
 /** READY: one block, identifiers first, about the exact pushed PR head. */
 export function ready(ctx: QueueContext, o: { pr: string; pregate?: string; gateExit?: number; gateLog?: string }): StepOutput {
   const run = PREGATE_OUT_REL;
+  const unfetched = refreshBase(ctx);
+  if (unfetched) return fail(unfetched, [], run);
   const policy = loadBasePolicy(ctx);
   if ('message' in policy) return fail(policy, [], run);
   const head = git(ctx.repoRoot, ['rev-parse', 'HEAD']).out;
@@ -273,6 +353,7 @@ export function ready(ctx: QueueContext, o: { pr: string; pregate?: string; gate
     `version: ${version}`,
     `base: origin/${ctx.base}@${baseSha}`,
     `ci: ${ci.line}`,
+    ...ci.superseded,
     ...(hint ? [hint] : []),
     pregateLine,
     ...(accepted ? flakyExceptionLines(accepted) : []),
@@ -295,8 +376,10 @@ export function ready(ctx: QueueContext, o: { pr: string; pregate?: string; gate
   if (!policy.policy.train && policy.policy.changelog_fragments) {
     const repo = repoIdentity(ctx.repoRoot);
     const now = nowIso();
-    const p = persist(ctx.repoRoot, [{ schema: 1, kind: 'ready', repo_key: repo.key, pr: o.pr, head, base_sha: baseSha, ready_at: now, screen: { choice: 'no-screen', policy: null, nonce: null, run: null, merge_sha: null }, updated_at: now, ...(plan.record ? { plan: plan.record } : {}) }], { remote: ctx.remote ?? 'origin' });
+    const remote = ctx.remote ?? 'origin';
+    const p = persist(ctx.repoRoot, [{ schema: 1, kind: 'ready', repo_key: repo.key, pr: o.pr, head, base_sha: baseSha, ready_at: now, screen: { choice: 'no-screen', policy: null, nonce: null, run: null, merge_sha: null }, updated_at: now, ...(plan.record ? { plan: plan.record } : {}) }], { remote });
     lines.push(`READY_RECEIPT: ${readyPath(repo.key, o.pr, head)} (${p.detail})`);
+    if (!p.pushed) return fail({ ...readyNoteUnpushed(o.pr, head, remote, p.detail), fix: `fix the notes push to ${remote} (the READY_RECEIPT line ends with its error), then rerun gstack-ship-queue ready --pr ${o.pr} with the same flags` }, lines, run);
   }
   return { ok: true, lines, run };
 }

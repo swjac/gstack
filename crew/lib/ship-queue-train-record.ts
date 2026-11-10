@@ -8,6 +8,7 @@
  * record is written locally before its note, and the note before any remote
  * effect that depends on it.
  */
+import { spawnSync } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { redactFindingSpans } from '../../lib/redact-engine';
@@ -287,9 +288,24 @@ function addNote(repoRoot: string, r: AnyRecord): boolean {
 }
 
 /**
+ * Whether the remote's notes ref holds the local notes tip: fetched back after
+ * a push, because a push can exit 0 without the ref moving (a proxy that drops
+ * the update), and a later writer's push may have moved it past the tip.
+ */
+function remoteHoldsNotes(repoRoot: string, remote: string): { ok: boolean; detail: string } {
+  const tip = git(repoRoot, ['rev-parse', '--verify', '--quiet', NOTES_REF]).out;
+  const f = git(repoRoot, ['fetch', '--no-tags', '-q', remote, `+${NOTES_REF}:${NOTES_REMOTE_REF}`]);
+  if (!f.ok) return { ok: false, detail: /couldn't find remote ref|no such ref/i.test(f.err) ? `the push exited 0 but ${remote} has no ${NOTES_REF}` : `${remote} ${NOTES_REF} could not be read back after the push: ${f.err.slice(0, 160)}` };
+  const fetched = git(repoRoot, ['rev-parse', '--verify', '--quiet', NOTES_REMOTE_REF]).out;
+  if (tip && (fetched === tip || git(repoRoot, ['merge-base', '--is-ancestor', tip, fetched]).ok)) return { ok: true, detail: '' };
+  return { ok: false, detail: `the push exited 0 but ${remote} ${NOTES_REF} is ${fetched.slice(0, 12) || 'absent'}, which does not hold the local notes ${tip.slice(0, 12)}` };
+}
+
+/**
  * Write records locally, then as notes, then push the notes ref (fetch,
- * merge and retry on a race). A failed push leaves the local records and
- * notes for the next write to carry, and says so.
+ * merge and retry on a race) and read origin back to confirm it holds them.
+ * A failed or unconfirmed push leaves the local records and notes for the
+ * next write to carry, and says so.
  */
 export function persist(repoRoot: string, records: AnyRecord[], opts: { push?: boolean; remote?: string } = {}): { pushed: boolean; detail: string } {
   for (const r of records) writeJsonAtomic(recordPath(r), r);
@@ -299,12 +315,21 @@ export function persist(repoRoot: string, records: AnyRecord[], opts: { push?: b
   let last = '';
   for (let i = 0; i < 3; i++) {
     const p = git(repoRoot, ['push', '-q', remote, `${NOTES_REF}:${NOTES_REF}`]);
-    if (p.ok) return { pushed: true, detail: `notes pushed to ${remote} ${NOTES_REF}` };
-    last = p.err.slice(0, 160);
+    const held = p.ok ? remoteHoldsNotes(repoRoot, remote) : null;
+    if (held?.ok) return { pushed: true, detail: `notes pushed to ${remote} ${NOTES_REF}` };
+    last = held ? held.detail : p.err.slice(0, 160);
     const f = fetchNotes(repoRoot, remote);
     if (!f.ok) return { pushed: false, detail: f.detail };
   }
-  return { pushed: false, detail: `git push ${NOTES_REF} failed: ${last}` };
+  return { pushed: false, detail: `git push ${NOTES_REF} failed after 3 tries: ${last}` };
+}
+
+/**
+ * QUEUE_READY_NOTE_UNPUSHED: `land --pin` reads the READY note on the remote, so a READY receipt written only here is
+ * not READY (reports/GSTA-461.md item 19). The train and plain ready paths both refuse with it.
+ */
+export function readyNoteUnpushed(pr: string, head: string, remote: string, detail: string): { code: 'QUEUE_READY_NOTE_UNPUSHED'; message: string } {
+  return { code: 'QUEUE_READY_NOTE_UNPUSHED', message: `the READY receipt for #${pr} at ${head.slice(0, 12)} is written locally, but ${remote} does not hold its note on ${NOTES_REF} (${detail}); land reads that note, so this head is not READY` };
 }
 
 function newerOrMissing(r: AnyRecord): boolean {
@@ -314,7 +339,7 @@ function newerOrMissing(r: AnyRecord): boolean {
   } catch { return true; }
 }
 
-function parseNote(text: string): AnyRecord | null {
+export function parseNote(text: string): AnyRecord | null {
   try {
     const r = JSON.parse(text);
     const ids = /^[A-Za-z0-9._-]{1,128}$/;
@@ -359,13 +384,36 @@ export function forgetNotes(repoRoot: string, names: string[], remote = 'origin'
   return { removed, missing, failed, pushed: p.ok, lease, detail: p.ok ? `notes pushed to ${remote} ${NOTES_REF} (lease ${lease?.slice(0, 12) ?? 'new ref'})` : `git push ${NOTES_REF} rejected: ${p.err.replace(/\s+/g, ' ').trim().slice(0, 160)}; the local notes ref was restored` };
 }
 
+/**
+ * The text of each blob, in order, from one `git cat-file --batch` process. Sizes are bytes, so the
+ * output is split as a Buffer before decoding; a missing or non-blob object yields no text. Null when
+ * the process fails, times out or overruns its buffer, so no partial read passes for a complete one.
+ */
+function readBlobs(repoRoot: string, blobs: string[]): string[] | null {
+  const r = spawnSync('git', ['cat-file', '--batch', '--buffer'], { cwd: repoRoot, input: blobs.join('\n') + '\n', timeout: 120_000, maxBuffer: 256 * 1024 * 1024 });
+  if (r.error || r.status !== 0) return null;
+  const out = r.stdout;
+  const texts: string[] = [];
+  for (let i = 0; i < out.length;) {
+    const nl = out.indexOf(10, i);
+    if (nl < 0) break;
+    const [, type, size] = out.subarray(i, nl).toString('utf8').split(' ');
+    if (size === undefined) { i = nl + 1; continue; }
+    const end = nl + 1 + Number(size);
+    if (type === 'blob') texts.push(out.subarray(nl + 1, end).toString('utf8'));
+    i = end + 1;
+  }
+  return texts;
+}
+
 /** Rebuild local records from the notes ref: a note whose record is missing locally, or newer than the local copy, is written. */
 export function rebuildFromNotes(repoRoot: string, remote = 'origin'): { restored: number; read: number; detail: string; fetched: boolean } {
   const f = fetchNotes(repoRoot, remote);
   const list = git(repoRoot, ['notes', `--ref=${NOTES_REF}`, 'list']);
   if (!list.ok || !list.out.trim()) return { restored: 0, read: 0, detail: f.detail, fetched: f.ok };
-  const records = list.out.split('\n').map(l => l.split(' ')[0]!).filter(Boolean)
-    .map(blob => parseNote(git(repoRoot, ['cat-file', 'blob', blob]).out)).filter((r): r is AnyRecord => !!r);
+  const texts = readBlobs(repoRoot, list.out.split('\n').map(l => l.split(' ')[0]!).filter(Boolean));
+  if (!texts) return { restored: 0, read: 0, detail: `git cat-file --batch failed reading ${NOTES_REF}; no note was read`, fetched: false };
+  const records = texts.map(parseNote).filter((r): r is AnyRecord => !!r);
   const fresh = records.filter(newerOrMissing);
   for (const r of fresh) writeJsonAtomic(recordPath(r), r);
   return { restored: fresh.length, read: records.length, detail: f.detail, fetched: f.ok };

@@ -219,6 +219,22 @@ Two stages with separate clocks, both printed:
   git diffed (a full-context `git diff`), never the working copy; an untracked
   file is read whole from disk. A file over the size limit, or whose full diff
   does not parse, is scanned on its added lines alone, without that context.
+  A file git calls binary (a NUL byte, UTF-16 text, or a `-diff` attribute)
+  is still scanned: the diff runs with `--text`, and its added lines are read
+  three ways, as bytes with control runs turned into spaces and as little- and
+  big-endian UTF-16. The three readings are scanned side by side on each line,
+  so a keyword in one reading still meets its value in another, and each
+  reading is also scanned as its own text with the file's line numbers, so a keyword and its value on the next line (an AWS secret key
+  under its YAML key) are caught in UTF-16 text as in plain text. Only
+  credential findings count in such a file, so image bytes that look like a
+  phone number are not reported. A file whose scanned text is over the
+  scanner's 16 MiB limit fails the check, and the pre-push hook blocks a push
+  whose diff is over 64 MiB. The hook leaves deleted files out of that diff,
+  so removing a large binary does not count toward the limit, but a replaced
+  binary's old bytes still do. Keep large binaries in Git LFS, whose small
+  pointer files scan as text. A merge-base diff git does not finish
+  (an error, a kill or a full buffer) is `PREGATE_ENVIRONMENT`, never a pass.
+  The pass line names the files read: `12 added lines clean in 3 files (1 binary)`.
 - `strays`: a new file at the repository root, a new top-level directory, or a
   scratch name (`zz-*`, or `tmp` or `scratch` as the whole name stem, optionally
   numbered: `tmp.js`, `tmp2.js`, `tmp_1.txt`, `scratch.md`, but not
@@ -435,11 +451,26 @@ The record is `.gstack/tmp/pregate.json` (`gstack-artifact validate --as pregate
 (Step 18) refuses unless the record is current for the tree being published
 (`PREGATE_STALE`: rerun after the final stamp), green (`PREGATE_LANE_FAILED`,
 `PREGATE_INCOMPLETE`, or `PREGATE_ENVIRONMENT` when every incomplete check is
-the machine's) and every `requires-remote` obligation carries a receipt
+the machine's), every `requires-remote` obligation carries a receipt
 (`PREGATE_REMOTE_UNCLEARED`: dispatch the job, wait for it to finish green, then
-`gstack-pregate clear --remote <workflow.yml/job> --run-url <url>`). The ship
+`gstack-pregate clear --remote <workflow.yml/job> --run-url <url>`), and it holds
+every registered check. The `PREGATE:` line prints `checks=N of M`. A record
+from a `--only` or `--stage preflight|tests` run that is missing checks is
+`PREGATE_INCOMPLETE` ("pregate.json holds checks=1 of 8 (missing: …)"): run
+`gstack-pregate --allow-repo-commands` with neither flag at that tree. The ship
 receipt then carries `pregate` and `requires_remote`. `gstack-pregate verify`
 runs the same check standalone.
+
+<a id="same-tree-checks"></a>
+**A staged rerun keeps the rest.** A `--only` or `--stage preflight|tests` run
+keeps the checks it skipped from the record it replaces, when that record has
+the same head, tree, base commit, policy and registry. It prints
+`PREGATE_MERGED: kept <check>=<status>,… from the record at this tree …`. So
+rerunning `--stage tests` after a full run at an unchanged tree keeps an earlier
+`secrets` failure and an earlier pass, and the full run's obligations come along
+when `lanes` is one of the kept checks. A record for another head or tree, or
+an earlier `--stage guards` run, keeps nothing. After a fix commit moves the
+tree, a staged run alone is not a full pass.
 
 **By tree.** Every record `gstack-pregate` writes is also mirrored, byte for
 byte, to `<state root>/pregate/by-tree/<tree>.json` (the state root from
@@ -451,11 +482,14 @@ printing `PREGATE: … (from the state root's pregate/by-tree/<tree12>.json,
 recorded by another checkout)`. This is for the lane whose `gstack-pregate
 --remote` had to run from a separate clone (a worktree cannot host it): the
 clone's record clears the lane's own checkout as long as both hold the same
-tree. Only a run that holds the tests stage stands in (what `--stage tests
---remote` writes, `checks=[lanes]`; a `--only timing` or preflight-only run
-is "a run without the tests stage"), and it must be recorded against
-`origin/<base>` and not under `--policy-from head`;
-otherwise the `PREGATE:` line says why the mirror cannot stand in. A record
+tree. Only a complete run stands in: the clone runs the full
+`gstack-pregate --remote` (not `--stage tests --remote`, whose `checks=[lanes]`
+record verify refuses `PREGATE_INCOMPLETE`), or the lane clears its own record
+with `gstack-pregate clear --remote pregate.json/remote_gate --receipt <file>`.
+A `--only timing` or preflight-only run is "a run without the tests stage",
+and the record must be recorded against `origin/<base>` and not under
+`--policy-from head`; otherwise the `PREGATE:` line says why the mirror cannot
+stand in. A record
 whose own checks failed or stayed incomplete is final and no mirror overrides
 it. An explicit `--pregate <file>` that verifies is used as before; a mirror
 for a different tree changes nothing. Writing the mirror is best effort (a
@@ -799,6 +833,12 @@ once:
   record (a reuse is never evidence). Its tree equals the tree git computes for
   the run's head commit. `files` is a list of paths and `tests` a
   non-negative integer when present; without `tests` the file count stands in.
+  The attempt it names is the newest one that ran a profile job itself
+  (GST-2284). A job-level rerun relists every job it did not rerun under the
+  new attempt with that job's old start and finish times, so a run where only
+  an unrelated job was rerun verifies against the attempt whose job uploaded
+  `tree.json`. A rerun of the uploading job leaves one artifact per attempt;
+  the one that names the job's newest attempt is read, and no other.
   <a id="skipped-files"></a>`skipped_files`, when present, lists the files whose every test skipped on
   the runner (a Docker image, a drive path or an installed gstack it lacks;
   GST-1190). A carry treats them as uncovered: the pregate tests stage runs
@@ -835,11 +875,10 @@ once:
   failed, was cancelled or is still running (`run_started_at`, so a red re-run
   of an older run counts, a run started in the same second counts, and
   re-running this run does not hide a failure in between).
-- The run finished within `max_age_hours` (its jobs' latest `completed_at`,
-  else the run's `updated_at`), and on the profile's OS when it names one.
-  Re-running only the failed jobs refuses (`artifact_mismatch`) unless the job
-  that uploads `tree.json` re-runs too, because that file must name the
-  newest attempt. The 8 MiB cap is read from the artifact's zipped size before
+- The run finished within `max_age_hours` (its profile jobs' latest
+  `completed_at`, else the run's `updated_at`), and on the profile's OS when it
+  names one. A job outside the profile never dates the run, so rerunning one
+  does not refresh old test results. The 8 MiB cap is read from the artifact's zipped size before
   download, so a workflow on the branch itself can still unpack a larger file
   into the temporary directory.
 
@@ -868,7 +907,8 @@ Then, for the lane:
   (gstack's gate leaves paid test files to the paid PR gate). Those files need
   no run, and the receipt counts them as `skipped=<n>`. A file the inventory
   prints stays required even when `skipped` names it, and a failing `skipped`
-  command refuses (`skipped_failed`). When `skipped` names every selected file,
+  command refuses (`skipped_failed`); when it failed because the checkout has
+  no installed dependencies, the refusal says so. When `skipped` names every selected file,
   no selected test ran, so the clear refuses (`paid_only`), just as the gate's
   own `tests=0` report never clears. Without `skipped`, every selected file
   must appear in a run's `files`.

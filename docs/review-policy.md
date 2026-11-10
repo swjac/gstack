@@ -172,7 +172,10 @@ A full pass 1 always gets a full pass 2: `--pass1-depth` carries pass 1's
 `REVIEW_DEPTH`, and an absent flag counts as full. The fix range
 `RANGE_BASE..HEAD` must have at most `SCOPED_RANGE_LINES` (150) runtime lines, counted
 as the depth counts them (`gstack-review-plan --range-base $PASS_HEAD` prints
-`FIX_RANGE:`). It dispatches one fix-check on the range, the Red Team on the
+`FIX_RANGE:`). The range holds only the PR's own change since `RANGE_BASE`: when
+a base merge lands inside it, what the base brought (a file only main changed,
+or main's lines in a file both changed) is not counted, and neither is its gate
+class (GST-2229, harness-evals #354). It dispatches one fix-check on the range, the Red Team on the
 range, the native adversarial pass when the range changes runtime lines, every
 force-included specialist and the outside voice when published numbers changed.
 Step 11's voices that have not run yet stay listed, as on a full pass 2. It
@@ -727,8 +730,10 @@ reads the newest `review-fix-check` row from `gstack-review-read`, chained back
 through earlier rows whose commit is the next row's `range_base`
 ([chained fix-checks](ship-policy.md#fix-check-chain), GST-1627). When every link
 is a completed clean read on committed content (freshness `CURRENT` against its own
-tree) whose commit is on the branch, the oldest link's `range_base` is a branch commit
-holding the reviewed tree, and for each link an approved `review_loop_grant` in
+tree; a fix-check that stopped on findings the owner has since ruled notes reads
+clean, [ruled notes](ship-policy.md#ruled-notes)) whose commit is on the branch, the oldest link's `range_base` is a branch commit
+holding the reviewed tree (or following its commit by docs and release metadata
+only, [docs bridge](ship-policy.md#fix-check-docs-bridge)), and for each link an approved `review_loop_grant` in
 `gstack-approvals` names a stop head inside its `range_base..commit`, each code or test path inside a link's `range_base..commit`
 that is unchanged since, or whose change against the base is still the one the
 fix-check read after a base merge also edited it (GST-1195), routes as
@@ -913,7 +918,11 @@ ones, and the arm lost blockers. `bin/gstack-review-dispatch` closes both ends:
    never split off as a second record (GST-1031); the line right under the heading that carries those fields, no other
    label and no file:line joins it at the stronger label (not under a heading that names CRITICAL or P0 itself), the way an unlocated paragraph after a blank line already does. An unnumbered, unlabeled bullet with no file:line
    under a paragraph finding whose Severity or Blocks line has not come yet is that finding's detail, so the field line after it
-   lands on the finding; a numbered item is its own finding.
+   lands on the finding; a numbered item is its own finding. A native adversarial numbered list item (`1. **FIXABLE. …**`)
+   with no fields of its own keeps, after an unlabeled nested list, its indented lines and the first paragraph after a blank
+   line until its fields come, so that paragraph's `Severity` and `Blocks` bind to the item instead of forming a second record;
+   an item naming CRITICAL or P0 is never lowered, and a list item, heading, lead label, file:line, bold paragraph opener,
+   verdict line or any later paragraph starts the next finding (ALPH-93).
    A reader's own no-defect closing sentence is no finding at the label it denies (GST-435): a prose line with no
    list, heading, bold or lead label, no `Severity` or `Blocks` field, no FIXABLE or INVESTIGATE, no file:line or path
    and no exception clause, with no line above it in its paragraph that runs on (no closing period) or names an
@@ -937,7 +946,12 @@ ones, and the arm lost blockers. `bin/gstack-review-dispatch` closes both ends:
    can't tell a finding's own fields from another subject's. Otherwise lead judgment can fold it only into a finding
    at least as severe, and it counts toward what blocks. GST-766 skipped negated labels and lost
    real blockers named in an exception clause ("No CRITICAL issues except the token leak in log.ts:3"); GSTA-167
-   reverted that. Each prose finding's line also
+   reverted that. A reply that says `NO FINDINGS` keeps only its structured findings (GST-2122). Those are JSON objects
+   (malformed JSON included), lead labels, label headings, numbered finding headings, `Severity` fields, `Blocks: yes`,
+   the native voice's FIXABLE or INVESTIGATE tag, and anything naming a file:line, which still collect at their label.
+   Its other prose collects nothing. Outside such a reply prose collects as described above. A denial that a change
+   introduced a severity ("No fix introduced a CRITICAL defect") is a no-defect clause too, and a line led by a bold,
+   unlabelled lead ("**1. Coverage:** …", "- **Callers:** …") is read for those clauses after its lead. Each prose finding's line also
    records the Severity and Blocks its own text states as `stated`, beside the collected label and never in its place;
    a classified finding that carries `stated` shows it in its `## Deferred findings` line next to the label ("CRITICAL (the
    reviewer wrote Severity: Low, Blocks: no)"). /ship's Step 9.4 does not copy `stated` into its findings file yet: that

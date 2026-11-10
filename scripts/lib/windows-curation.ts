@@ -314,6 +314,10 @@ export const KNOWN_WINDOWS_INCOMPATIBLE: Array<{ file: string; reason: string }>
     reason: 'spawns bin/gstack-ship-queue (shebang) and a #!/bin/sh gh shim through test/helpers/restamp-fixture.ts and test/helpers/ship-queue-fixture.ts',
   },
   {
+    file: 'test/ship-queue-ready-fresh-base.test.ts',
+    reason: 'spawns bin/gstack-ship-queue (shebang) and a #!/bin/sh gh shim through test/helpers/restamp-fixture.ts and test/helpers/ship-queue-fixture.ts (windows-scoped-shard, run 42720453184)',
+  },
+  {
     file: 'crew/test/release-gate-workflow.test.ts',
     reason: 'the gate-step case splices a native temp-path stub into the step\'s bash -e script in place of crew/bin/gstack-release-gate, and on windows-latest its gated case exits non-zero (expected 0; windows-scoped-shard, run 42421330820); release-gate.yml itself runs only on ubuntu-latest',
   },
@@ -329,6 +333,10 @@ export const KNOWN_WINDOWS_INCOMPATIBLE: Array<{ file: string; reason: string }>
   {
     file: 'crew/test/ship-queue-train.test.ts',
     reason: 'drives bin/gstack-ship-queue against the stateful #!/bin/sh gh shim in test/helpers/ship-queue-train-fixture.ts; on windows-latest spawnSync(\'gh\') resolves the runner\'s gh.exe instead of the shim (windows-free-shard run 39152702056)',
+  },
+  {
+    file: 'crew/test/ship-queue-ready-notes-push.test.ts',
+    reason: 'drives bin/gstack-ship-queue ready against the #!/bin/sh gh shim in test/helpers/ship-queue-train-fixture.ts, like crew/test/ship-queue-train.test.ts; on windows-latest spawnSync(\'gh\') resolves the runner\'s gh.exe instead (windows-scoped-shard run 42711409624)',
   },
   {
     file: 'crew/test/ship-queue-train-bisect.test.ts',
@@ -446,6 +454,10 @@ export const KNOWN_WINDOWS_INCOMPATIBLE: Array<{ file: string; reason: string }>
   {
     file: 'test/ship-record-ci-reuse.test.ts',
     reason: 'drives bin/gstack-evidence, gstack-ship-preflight and gstack-ship-release (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-accept-remote-gate-lanes.test.ts; windows-latest fails every case at the first bin spawn (windows-scoped-shard, run 42382484796)',
+  },
+  {
+    file: 'test/ship-finish-fixed-links.test.ts',
+    reason: 'drives bin/gstack-ship-release, gstack-approvals, gstack-review-log, gstack-docs-candidate and gstack-wtree (shebangs) through test/helpers/ship-bin-fixture.ts like test/ship-finish-ruled-notes.test.ts; windows-latest fails every case at the first bin spawn (windows-free-shard 3, run 42593329215)',
   },
 ];
 

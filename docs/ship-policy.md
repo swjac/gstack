@@ -223,7 +223,10 @@ READY_RECEIPT: <state root>/ship-queue/ready/<repo key>/42-<head>.json (notes pu
 ```
 
 Under `changelog_fragments`, a `READY_RECEIPT:` line follows, written only when
-every check above passed; `land` refuses a pin without one.
+every check above passed; `land` refuses a pin without one. It says `notes
+pushed` only once origin holds the note; otherwise `ready` refuses with
+[`QUEUE_READY_NOTE_UNPUSHED`](troubleshooting.md#queue-ready-note-unpushed),
+as it does under a train, because `land` reads the note on origin.
 
 CI's Version Gate (`scripts/compare-pr-version.ts`) accepts that head as
 unstamped when `VERSION` and `package.json`'s version match its merge base, the
@@ -265,13 +268,24 @@ so it builds the scratch merge described below (`SCREEN_MERGE:`, pushed as
 (or a remote whose refs cannot be listed) is `QUEUE_SCREEN_STALE_REF`. A CHANGELOG-only conflict is screenable, and a
 lane whose skill's own paid cases ran focused may still READY with `--no-screen`.
 
-`ci:` counts the latest run per check (one app's check name), as GitHub's
-rollup does: a check that was re-run or superseded on the same commit (a
-cancelled run beside a later pass of the same name from a second workflow run)
-is judged by its newest run (latest `completed_at`, then id; a run still in
+`ci:` reads every attempt of each check suite and judges a suite by its latest
+attempt that has jobs (earlier attempts count only when the latest has none).
+It keeps the newest run per check (one app's check name): a check that was
+re-run or superseded on the same commit is judged by its newest run (latest `completed_at`, then id; a run still in
 progress is newest); two apps reporting the same name stay separate; a run with
 no name or no readable `completed_at` counts on its own; commit-status contexts
-are counted one each.
+are counted one each. A workflow run that failed without starting any job
+counts as a failed check `<workflow> (run <id>, no jobs)` unless a later run of
+the same workflow replaced it; a run cancelled before any job is not counted.
+An unreadable list is unknown, never green.
+
+When a check counts as passing only because a newer run from another check
+suite replaced a red one (a branch-only `free-tests.yml` dispatch beside the red
+`pull_request` run, which tested the merge with the base), `ready` prints
+`CI_SUPERSEDED: <check> red run <id> replaced by <id> (suite <a> → <b>)` under
+the `ci:` line, one per replaced run, and `land` prints the same under its `CI:`
+line. It is a warning and changes no verdict; a rerun in the same suite prints
+nothing ([what to do](troubleshooting.md#ci-superseded)).
 
 It refuses (`QUEUE_NOT_READY`) when the working tree has tracked edits, HEAD
 is not the PR's pushed head, CI at that exact head is not green, or the pregate
@@ -729,7 +743,16 @@ slot. The queue enforces this at every step from the PR body alone:
   `REVIEW_TARGETED:` line) when a targeted class the head needs has no done
   targeted pass in the receipt, and `QUEUE_RECEIPT_EXCEPTION_INVALID` when an
   owner exception it records does not stand ([the ship receipt](#ship-receipt)).
-  There is no flag around it.
+  There is no flag around it. Before any of these checks, and before it
+  chooses the train or plain path from the policy, `ready` fetches
+  `origin/<base>` and reads the policy and every receipt field against that
+  fresh ref (a clone with a missing or stale base ref would otherwise run plain
+  `ready` under a train policy and skip the screen, conflict and READY-receipt
+  steps), so a lane clone whose base is behind the remote never turns a good
+  receipt into `RECEIPT_INVALID` (GST-2232); a failed fetch refuses with
+  `QUEUE_BASE_UNFETCHED` before anything is compared. The stamp path of `land`
+  refuses the same way; `land --pin` (`merge: direct`) refuses a failed fetch
+  with `QUEUE_NOT_READY`, as it already did.
 - `train build` refuses a pin whose PR has no current receipt with the same
   codes, naming the PR, before anything is written, pushed or dispatched,
   `--dry-run` included.
@@ -787,7 +810,11 @@ narrow screen, except `setup`, which no paid run executes: a narrow screen
 derives it like any other file. The nonce key carries the purpose and
 the policy, so a repeat follows the same run and a broad screen never adopts
 a narrow one. The READY block gains `screen: …`, and the receipt is written
-locally and to the notes ref. `--dry-run` prints the dispatch without sending
+locally and to the notes ref. `READY_RECEIPT:` says `notes pushed` only after
+`ready` reads origin's notes ref back and finds the note; after three tries
+without it, `ready` refuses with
+[`QUEUE_READY_NOTE_UNPUSHED`](troubleshooting.md#queue-ready-note-unpushed),
+because `land` reads the note on origin. `--dry-run` prints the dispatch without sending
 it. Before dispatching, `ready` fetches the merge ref and requires its second
 parent to be the PR head and its first parent the current base: a missing,
 lagging or unfetchable merge ref (GitHub stops recomputing it while the PR
@@ -1539,7 +1566,9 @@ same one (a mixed set makes it `VERIFY: dirty`). `gstack-ship-receipt write
 --review-exclude <d>`, with that digest, records `review_exclude` (source, patterns, counts, the gate-tagged kept
 paths and three hashes). The `digest` hashes the declared patterns and the
 excluded and kept lists; `source` is provenance only. Write, carry and the queue
-each recompute the digest at the current base and compare it, so a base merge
+each recompute the digest at the current base and compare it (the queue fetches
+that base first), over the PR's own files: the diff from the head's merge base
+with that base, never a two-dot diff against the base tip, so a base merge
 or a moved base that leaves the patterns and the lists unchanged still carries
 and binds. A different digest means the digest write was given (or the receipt recorded) names another selection than the head has now:
 write refuses with `RECEIPT_INVALID field=review_exclude`, carry with
@@ -1668,13 +1697,22 @@ row is ignored. Step 16's `finish` reads the branch's rulings
 (`lib/ruled-notes.ts`) and prints each as `RULED_NOTE: <fingerprint> at <head12>
 ruled by <who> at <time>: <reason> (approval <id>)`. A ruling closes a finding on
 a `review-fix-check` row finish counts (the newest, or an earlier link of its
-[chain](#fix-check-chain); action `skipped`, `noted` or `deferred`, not a
+[chain](#fix-check-chain); action `open`, `skipped`, `noted` or `deferred`, not a
 gate finding) when its head lies inside that row's `range_base..commit`, the same
 test a `review_loop_grant` passes. So the order of ruling and fix-check doesn't
 matter, and a ruling made at an earlier /ship's head closes nothing: its
 `RULED_NOTE:` line ends `(outside this fix-check's range; not applied)`. A granted
 fix-check whose other findings are all below the floor then reads CURRENT and
-counts. A skipped CRITICAL with no ruling stays open. Nothing ruled is hidden:
+counts. That includes the usual order, where the fix-check finds a new CRITICAL,
+logs it `open` with `converged:false` and stops for the owner, and the owner rules
+afterwards: the row's `incomplete` binding still names the one tree it read, so
+once every blocking finding on it is ruled it binds at that tree as a clean read
+(harness-evals#361, GST-2251). A CRITICAL with no ruling stays open, and while one
+does, finish prints `FIX_CHECK_OPEN: <fingerprints> on the fix-check at <commit12>`
+naming the `gstack-approvals rule` command for each
+([troubleshooting](troubleshooting.md#fix-check-open)). A review-loop exception is
+not a ruling: it accepts edits after a fix-check, never the fix-check's own
+findings. Nothing ruled is hidden:
 `gstack-approvals rulings` prints one `Ruled note: …` line per ruling for the
 Pre-Landing Review and the PR body, `gstack-ship-receipt write` records them as
 `ruled_notes` (each with its `head`) and refuses a `--body` that does not carry each
@@ -1889,6 +1927,20 @@ reason (`range_base <sha12> does not hold the reviewed tree`); a link that is
 stale or ungranted refuses with its reason and `; fix-check at <sha12>, link <k>
 of <n>`. Either way nothing in the chain counts.
 
+<a id="fix-check-docs-bridge"></a>One gap is not a gap: the oldest link's `range_base` may follow the reviewed
+tree's commit by commits that change only authored docs or release metadata,
+such as the Step 14.5 docs commit (harness-evals#361, GST-2294). finish walks
+`range_base`'s first parents back to the nearest commit holding the reviewed tree
+and accepts the range when every commit after it is a single-parent commit whose
+every path it routes as docs or release metadata, printing
+`FIX_CHECK_DOCS_BRIDGE: range_base <sha12> follows the reviewed commit <sha12> by
+docs or release metadata only (<commits>)`. Those docs still take the docs route
+and its recheck. A code or test commit in between, a merge, a `range_base` the
+reviewed commit descends from, and a `range_base` on another branch still refuse.
+Pass `--reviewed-tree` as the tree the bound review read, never the fix-check's
+own tree: with the fix-check's tree, `range_base` sits before the "reviewed"
+commit and finish refuses (#4267, #4270).
+
 <a id="test-code"></a>
 <a id="uid-sidecar"></a>
 ## `test_code` and Godot UID sidecars after review
@@ -1985,6 +2037,11 @@ and from then on names the base it was carried to. A parent that has not landed,
 since, or a parent that landed with changes the child never merged all leave a
 different diff and refuse with `RECEIPT_CARRY_PRODUCT_CHANGED`. An older
 receipt whose parent branch is gone refuses with `RECEIPT_CARRY_REFUSED`.
+Until the carry moves it, `ready`, `land --pin` and train build refuse a
+receipt whose `base` is not the queue's base with
+`QUEUE_RECEIPT_BASE_MISMATCH` (GST-2153): a child retargeted to the base while
+its parent is still open would otherwise land the parent's commits under a
+receipt that reviewed only the child.
 
 **Stacked PRs reviewed against the base (GST-1199).** A child PR that targets
 the base while stacked has a receipt whose `base` is the base and whose
@@ -2121,8 +2178,8 @@ changed paths' diff, then the scoped-review sections of the context paths. The
 400-line and 64 KB caps count the whole packet, and `range_diff_sha256` binds
 all of it. The record also names `range_base`, the commit the reviewed range
 starts from (the fork point, or a landed stack parent), and the carry reason
-logs the context paths and that `range_base`. A context section over 200 lines,
-or a packet over the caps, prints `RECHECK: not eligible (<why>)` and stays
+logs the context paths and that `range_base`. A context section with over 200
+of the branch's own +/- lines, or a packet over the caps, prints `RECHECK: not eligible (<why>)` and stays
 `RECEIPT_CARRY_PRODUCT_CHANGED`. A changed path alone, or context paths alone,
 keep the routes above, and their output is unchanged.
 
@@ -2378,8 +2435,9 @@ restamping`, GST-1245), so a reset stamp needs no hand cleanup:
    without a READY receipt (`gstack-ship-queue ready --pr <n>` records one
    on `refs/notes/gstack-trains` once its pregate, full_e2e and receipt checks
    pass; land checks nothing weaker), a /ship receipt that is missing or
-   bound to another head (`QUEUE_RECEIPT_MISSING`, `QUEUE_RECEIPT_STALE`), and
-   required checks that are not green at the pin.
+   bound to another head (`QUEUE_RECEIPT_MISSING`, `QUEUE_RECEIPT_STALE`) or
+   reviewed against another branch than the base
+   (`QUEUE_RECEIPT_BASE_MISMATCH`), and required checks that are not green at the pin.
 2. **Lock.** Take the repository land lock, `refs/notes/gstack-land` (its own
    ref, never the trains notes ref), by exact lease. It records the PR, holder,
    phase and journal. A held lock is `QUEUE_LAND_LOCKED` naming the holder;
@@ -2453,6 +2511,7 @@ release-file rows):
 | the PR is open, on the base, from this repository | `QUEUE_NOT_READY`, `QUEUE_TRAIN_UNTRUSTED` |
 | the PR head is the pin | [`QUEUE_LAND_PIN_MOVED`](troubleshooting.md#queue-land-pin-moved) |
 | the PR body's /ship receipt is bound to the pin | `QUEUE_RECEIPT_MISSING`, `QUEUE_RECEIPT_STALE` |
+| the receipt's `base` is the queue's base | [`QUEUE_RECEIPT_BASE_MISMATCH`](troubleshooting.md#queue-receipt-base-mismatch) |
 | a READY note from `ready` exists at the pin | `QUEUE_NOT_READY` |
 | no freeze is active (with `--repair`: one is, and its repair slot is free or already this pin; a backstop freeze left from before `release_gate` only warns; see [direct freeze](#direct-freeze)) and no land lock is held | [`QUEUE_TRAIN_FROZEN`](troubleshooting.md#queue-train-frozen), `QUEUE_NOT_READY`, `QUEUE_LAND_LOCKED` |
 | VERSION, the `package.json` version, the CHANGELOG and `.gstack/version-path` are unchanged since the merge base | [`QUEUE_LAND_STAMPED`](troubleshooting.md#queue-land-stamped) |

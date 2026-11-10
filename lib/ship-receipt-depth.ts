@@ -504,6 +504,8 @@ export function bindShippedReceipt(root: string, baseRef: string, body: string, 
   if (!b.ok) return b;
   const self = merged ? null : baseContainsHead(root, baseRef, b.head);
   if (self) return { ok: false, code: 'BASE_CONTAINS_HEAD', message: self, line: b.line };
+  const based = merged ? b : bindReceipt(body, pr, accepted, { base: baseRef });
+  if (!based.ok) return based;
   const ancestor = (commit: string) => b.receipt.carry?.ancestry === 'rewritten' || git(root, ['merge-base', '--is-ancestor', commit, b.head]).ok;
   const problems = exceptionProblems(body, b.receipt, ancestor);
   if (problems.length) return { ok: false, code: 'QUEUE_RECEIPT_EXCEPTION_INVALID', message: `the receipt's owner exception does not stand: ${problems.join('; ')}`, line: b.line };
@@ -531,7 +533,7 @@ export function bindShippedReceipt(root: string, baseRef: string, body: string, 
  * commit since `from` that origin/<base> does not hold, side-branch merges included (a CI skip marker is gate class). A path in
  * `keep` keeps `from`'s content. Null when git cannot build it.
  */
-function ownChangeSince(root: string, base: string, from: string, head: string, keep: readonly string[] = []): string | null {
+export function ownChangeSince(root: string, base: string, from: string, head: string, keep: readonly string[] = []): string | null {
   const run = (args: string[], env?: NodeJS.ProcessEnv, input?: string) => {
     const r = spawnSync('git', args, { cwd: root, encoding: 'utf8', env, input, timeout: 60_000, maxBuffer: 256 * 1024 * 1024 });
     return r.status === 0 ? r.stdout : null;

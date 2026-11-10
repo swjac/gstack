@@ -987,6 +987,20 @@ pick a new `--output`), then copy the recovery file to where you want it.
 
 ---
 
+## Uninstall
+
+### `gstack-uninstall: refusing to delete <folder>: <checkout> has uncommitted changes` (or `has commits no remote-tracking branch contains`, `registers the locked worktree <path>`)
+
+`gstack-uninstall` checks every folder it is about to delete (each host's gstack install, global and project-local, the gstack-made Claude per-skill folders, and `~/.gstack`) before it removes anything. A git checkout inside one of them holds work that exists nowhere else, so the uninstall stopped with exit 2 and removed nothing. The variants `is a git checkout git cannot read`, `has a status git cannot read`, `has a history git cannot read` and `has worktrees git cannot list (gstack-uninstall needs git 2.36 or later)` mean git could not prove the checkout is safe to delete; for the last one, upgrade git to 2.36 or later.
+
+Fix: commit and push that checkout's work, or move the checkout out of `<folder>`. Unlock a locked worktree with `git worktree unlock <path>` if you want it gone. Then re-run `gstack-uninstall`. Checkouts under the current repo's `.gstack-worktrees/` have their own check, which `--force-worktrees` relaxes; this one has no override. [docs/uninstall.md](uninstall.md#option-1-run-the-uninstall-script)
+
+### `gstack-uninstall: refusing to delete <folder>: it holds <path>, which this uninstall keeps`
+
+`<folder>` is a gstack install the uninstall would delete, and `<path>` is state this run promised to keep: with `--keep-state`, `~/.gstack`, your state root, or the current repo's `.gstack/` or `.gstack-worktrees/`; without it, a state root selected by `GSTACK_HOME` or a similar variable. The usual cause is running `gstack-uninstall --keep-state` from inside the gstack checkout itself.
+
+Fix: run `gstack-uninstall` from outside `<folder>` (for example `cd ~ && ~/.claude/skills/gstack/bin/gstack-uninstall --keep-state`), or move `<path>` out of `<folder>` first. [docs/uninstall.md](uninstall.md#option-1-run-the-uninstall-script)
+
 ## Codex and other env-var hosts
 
 <a id="gstack-no-install-found"></a>
@@ -1797,10 +1811,12 @@ revision, and the trailer stays `gstack: ok` with the notes above: a gap
 above the minimum is never a hard fail. The verdict records the installed
 revision, so a lane that is behind reports it (`behind=` rides every report).
 
-**Fix.** When the lane needs the newer gstack (a `floor=` note, or a fix that
-landed upstream), clear the named cause and run the fix: `bin/gstack-upgrade`
-after the refusal is resolved, or the Capy skill installer again once the
-lease holder finishes. Below the supported minimum the bootstrapper fails
+**Fix.** A `behind=` of 1 or more calls for the newer gstack before the next
+workflow: clear the named cause, then run `bin/gstack-upgrade` after a refusal
+is resolved, or the Capy skill installer again once the lease holder finishes.
+While the cause is not yours to clear (another session's lease, an open /ship
+or review run), report the trailer and work on the certified revision until it
+clears. Below the supported minimum the bootstrapper fails
 `revision` instead (`REVISION_BELOW_MINIMUM`).
 
 <a id="pin-unreasoned"></a>
@@ -1815,8 +1831,8 @@ with no recorded reason. It checked out the default branch where needed and
 fast-forwarded. A dirty or diverged checkout is still never moved, and a live
 workflow lease, eval run or open /ship or review run still defers the upgrade
 (`UPGRADE_BUSY`). On
-`--check` the trailer carries `stale=<h>h` with the install as its fix; unlike a
-bare `behind=`, run that fix before the first workflow.
+`--check` the trailer carries `stale=<h>h` with the install as its fix; run that
+fix before the next workflow, as for any `behind=` of 1 or more.
 
 **Fix.** Nothing, when the pin was not deliberate. To keep a pin, record why:
 `GSTACK_PIN_REASON=<why>` in the session's environment, or
@@ -4404,7 +4420,10 @@ first, then merge the base into this branch and rerun.
 `set -o pipefail`, or reported zero tests (ZERO-RUN).
 
 **Fix.** Read the printed lane log, fix the failure, rerun
-`gstack-pregate --stage tests`. A `| tail`-hidden exit is still an exit.
+`gstack-pregate --stage tests`. A `| tail`-hidden exit is still an exit. A fix
+that changes the tree leaves the staged rerun nothing to keep, so finish with a
+full `gstack-pregate --allow-repo-commands` before `verify`
+([docs/pregate.md](pregate.md#same-tree-checks)).
 
 <a id="pregate-incomplete"></a>
 ### `PREGATE_INCOMPLETE`
@@ -4412,7 +4431,11 @@ first, then merge the base into this branch and rerun.
 **Meaning.** A check timed out, a runner process was killed by a signal (out of
 memory, an outside kill) and ended without an exit code, repo commands were not
 allowed, no runner is declared or detected, or the working tree changed while
-the check ran. Incomplete is never pass and blocks publication. A tool missing from PATH, a
+the check ran. `gstack-pregate verify` also refuses a record that is missing
+registered checks ("pregate.json holds checks=1 of 8 (missing: …)"): a
+`--only` or `--stage preflight|tests` run with no record at the same head, tree,
+base and policy to keep the rest from
+([docs/pregate.md](pregate.md#same-tree-checks)). Incomplete is never pass and blocks publication. A tool missing from PATH, a
 network or quota error before any test ran, or a full disk is
 [`PREGATE_ENVIRONMENT`](#pregate-environment) instead, so the machine's failure
 reads apart from the diff's.
@@ -4421,7 +4444,9 @@ reads apart from the diff's.
 package the message says has none (or declare `runner`), raise `--timeout`, or
 keep the tree still, then rerun. A runner killed by a signal never passes: read
 the lane log, then rerun or split the selection. A tool missing from PATH is
-[`PREGATE_ENVIRONMENT`](#pregate-environment), with its own fix.
+[`PREGATE_ENVIRONMENT`](#pregate-environment), with its own fix. A record
+missing checks needs a full `gstack-pregate --allow-repo-commands` (neither
+`--only` nor `--stage`) at that tree.
 
 <a id="pregate-stalled"></a>
 ### `PREGATE_STALLED`
@@ -4620,6 +4645,82 @@ body and its receipt would disagree. Nothing was written.
 **Fix.** Paste every line `gstack-issue-links` printed under `## Issues` in the
 body (or rerun `gstack-issue-links --out` if the issue set changed), then rerun
 the receipt write.
+
+## The pre-archive check and issue close on land
+
+Codes printed by `bin/gstack-archive-check` (crew/docs/captain.md#no-orphaned-work). Each
+ends an error line in parentheses. In every case nothing was archived and no issue was closed.
+
+<a id="archive-reads-stale"></a>
+### `ARCHIVE_READS_STALE`
+
+**Meaning.** The `read_at` in the reads file is more than 15 minutes old, or more than 2
+minutes in the future. Old reads can miss a PR or issue the thread picked up since.
+
+**Fix.** Rerun the whole archive program: it reads `tools.thread.get` and
+`tools.issue.read` again and stamps `read_at` with the program's `now()`.
+
+<a id="archive-reads-unparsed"></a>
+### `ARCHIVE_READS_UNPARSED`
+
+**Meaning.** A part of the reads (named in the line: `reads`, `read_at`, `thread` or
+`issues`) is missing, empty, truncated or holds something the check does not know: no
+`States:` header in the issue text, no `pull_requests` array, `pull_requests_total`
+larger than the list, an issue list with neither a row nor `No issues match.`, an
+unrecognized line or a state the header does not name. An empty
+read looks like "no work", so the check refuses instead of guessing.
+
+**Fix.** Write the tool results raw, unedited. When the issue list has more pages, read
+them all first, then rerun. A truncated PR list has no fix: `tools.thread.get` lists at
+most 20 PRs and cannot page through the rest, so a thread that has held more than 20 PRs
+cannot be proven clean and stays unarchived.
+
+<a id="archive-thread-mismatch"></a>
+### `ARCHIVE_THREAD_MISMATCH`
+
+**Meaning.** The reads are for another thread than `--thread` names.
+
+**Fix.** Read the thread you mean to archive and pass the same code.
+
+<a id="archive-pr-not-merged"></a>
+### `ARCHIVE_PR_NOT_MERGED`
+
+**Meaning.** `gstack-archive-check landed` ran on a PR GitHub does not report as merged.
+
+**Fix.** Run it after `gstack-ship-queue land` prints `MERGED`.
+
+<a id="archive-gh-read-failed"></a>
+### `ARCHIVE_GH_READ_FAILED`
+
+**Meaning.** `gh pr view <n> --repo <repo>` failed, printed no JSON, or answered for a
+different PR than the one asked for. A failed read is never clean.
+
+**Fix.** Check `gh auth status` and the repository, then rerun, at most twice. If it
+still fails, leave the thread unarchived (or the issue open) and tell the Captain.
+
+<a id="archive-pr-state-unknown"></a>
+### `ARCHIVE_PR_STATE_UNKNOWN`
+
+**Meaning.** `gh pr view` answered for the right PR, but its `state` was empty or something
+other than `OPEN`, `CLOSED` or `MERGED`. The check can't tell whether the PR is still
+open, so it refuses instead of treating the PR as closed. On the land step
+(`gstack-archive-check landed`) it exits 3 instead of 1, because "not merged" would be a
+guess too.
+
+**Fix.** Rerun once. If gh still prints that state, check `gh --version` and look at the
+PR on GitHub. Leave the thread unarchived (or the issue open) and tell the Captain.
+
+<a id="archive-policy-unreadable"></a>
+### `ARCHIVE_POLICY_UNREADABLE`
+
+**Meaning.** `gstack-archive-check landed` found no usable `.gstack/plain-titles.json` in the
+directory it ran from: the file is missing, isn't valid, or lists no `codes`. Without those
+patterns any code-shaped ref in the title (another crew's `ZZZ-4`, say) would look like
+an issue to close, so it closes nothing.
+
+**Fix.** Run it from the repository root, where `.gstack/plain-titles.json` lives. If the
+file is missing or invalid there, fix it on main
+([plain titles](ship-policy.md#plain-titles)) and rerun. Close no issue until then.
 
 ## Eval plans, lane ownership, evidence verification, the owner brief
 
@@ -5411,6 +5512,20 @@ which line is not yet true. For `train land`, do what `NEXT:` says, then rerun
 the same `train land` command; it adopts its own journaled stamp commit. For an
 unreadable land lock, rerun the same `land` command once origin answers; it
 resumes its own lock.
+
+<a id="queue-base-unfetched"></a>
+### `QUEUE_BASE_UNFETCHED`
+
+**Meaning.** `gstack-ship-queue ready` (or the stamp path of `land`) could not
+fetch `origin/<base>`, so it stopped before reading the policy (which also
+picks `ready`'s train or plain path) or comparing any receipt field. Both compare the receipt's recorded selection, depth and
+targeted classes with what the current base gives the head; a local
+`origin/<base>` a few landings old measures the PR from an older merge base,
+pulls in files of PRs that already landed, and reports a false
+`RECEIPT_INVALID field=review_exclude` (GST-2232). Nothing was written.
+
+**Fix.** Make `git fetch origin <base>` work in this clone (network, remote
+URL, credentials), then rerun the same command.
 
 <a id="queue-proof-missing"></a>
 ### `QUEUE_PROOF_MISSING`
@@ -6236,6 +6351,26 @@ READYs, trains, carries or merges on it, except on a train with `gates`, where
 <file>`), then run `/ship --resume <record>`, which reruns Step 5 and rewrites
 the receipt without `base_red`.
 
+<a id="queue-receipt-base-mismatch"></a>
+### `QUEUE_RECEIPT_BASE_MISMATCH`
+
+**Meaning.** The PR body's ship receipt was reviewed against another branch
+than the queue's base: its `base` names a parent branch, as a
+[stacked child's receipt](ship-policy.md) does (#3570), while the PR now
+targets the base. That receipt covers only the change since the parent, so
+the parent's commits the PR carries were never reviewed under it. `ready`,
+`land --pin` and train build refuse it while the parent is open, instead of
+landing the parent's commits past the parent's own receipt and READY.
+A receipt whose `base` is the queue's base (`main` or `origin/main`),
+including a stacked child reviewed against the base (GST-1199), is
+unaffected.
+
+**Fix.** Land the parent first, merge the base into this branch and push.
+Then run `gstack-ship-receipt carry --pr <n> --base <base>`: it moves the receipt to the base when the parent fully landed
+and the child is unchanged, and from then on the receipt names the base. If
+the carry refuses, rerun /ship against the base. Then rerun
+`gstack-ship-queue ready --pr <n>`.
+
 <a id="base-red-unconfigured"></a>
 ### `BASE_RED_UNCONFIGURED`
 
@@ -6403,6 +6538,49 @@ CHANGELOG-only or stamp-file-only conflict does not refuse, unless the PR's
 CHANGELOG drops or renames a released heading (the message then names the
 CHANGELOG). `train prune --stale` deletes the scratch branches of merged or
 closed PRs.
+
+<a id="ci-superseded"></a>
+### `CI_SUPERSEDED: <check> red run <id> replaced by <id> (suite <a> → <b>)`
+
+**Meaning.** `gstack-ship-queue ready` or `land` judges each check by its
+newest run, and here the newest run passed in a different check suite from an
+older red run of the same check. The usual cause is a lane dispatching
+`free-tests.yml` on its branch after the `pull_request` run went red. The
+`pull_request` run tested GitHub's merge of the branch with the base, and the
+dispatched run tested the branch alone, so a failure that exists only on the
+merge with main can be hidden. The line is a warning: CI still counts as
+green, and nothing is refused. A rerun of the red run in its own suite prints
+nothing (reports/GSTA-461.md item 7).
+
+**Fix.** Nothing is required. Before sending READY or landing, open the red
+run (`gh run view <id>` names the job) and check whether it failed for a reason
+the branch-only run could not see. If it was a flaky test, log it as flaky the
+usual way. To clear the line, rerun the failed `pull_request` run itself
+(`gh run rerun <run> --failed`), which replaces it in the same suite.
+
+<a id="queue-ready-note-unpushed"></a>
+### `QUEUE_READY_NOTE_UNPUSHED`
+
+**Meaning.** `gstack-ship-queue ready` (under a train policy, or under
+`changelog_fragments` without one) wrote the READY receipt in the local
+state root, but origin does not hold its note on `refs/notes/gstack-trains`.
+`ready` pushes the notes ref, then fetches it back and requires origin's tip
+to be the local tip or to contain it. It tries three times, fetching and
+merging origin's notes between tries. Either the push failed (a rejected ref,
+credentials, the network) or it exited 0 and origin still read back without
+the note, as when a proxy drops the update. `land --pin` reads the READY note
+on origin and refuses the pin with `QUEUE_NOT_READY` without it, so `ready` refuses
+here instead of printing `notes pushed`. Before this check, ready exited 0 and
+the land failed instead (#4245). Don't send the READY block.
+
+**Fix.** The `READY_RECEIPT:` line ends with the push's error. Fix what
+refused it, then run the `NEXT:` line, which is the same `ready` command
+without `--pregate`, `--gate-exit` or `--gate-log`: add back any of those you
+passed the first time. It keeps the first `ready_at`, follows a screen run already dispatched at the
+same merge SHA, and pushes the kept receipt. Without a train policy there is
+no `NEXT:` line: rerun the same `ready` command with the same flags, and it
+writes the receipt again and pushes it. To see the raw error, run
+`git push origin refs/notes/gstack-trains:refs/notes/gstack-trains`.
 
 <a id="queue-screen-red"></a>
 ### `QUEUE_SCREEN_RED`
@@ -6671,6 +6849,29 @@ PR whose older receipt lost its parent branch, or a depth, targeted or exception
 refusal, run /ship on the new head. When `--head` is not the checked-out HEAD,
 check it out and carry there.
 
+<a id="fix-check-open"></a>
+### `FIX_CHECK_OPEN`
+
+**Meaning.** `gstack-ship-release finish` did not count a granted fix-check
+because it still has findings no owner has ruled on that still hold it open. The line lists
+their fingerprints and the fix-check's commit. A fix-check that found a new
+CRITICAL logs it `open` with `converged:false`, so `FIX_CHECK: not counted`
+reads `missing start capture or incomplete/nonconverged pass` until the
+rulings exist. A `--review-loop-exception` does not help here: it accepts
+edits made after `fix_check.head` (`REVIEW_LOOP_EXCEPTION: accepted none`
+when there are none), never the fix-check's own findings (harness-evals#361).
+
+**Fix.** When the owner accepts the findings as disclosed notes, the owner
+records one ruling per listed fingerprint, outside the lane's /ship run, at
+the printed commit or any head inside the fix-check's range:
+`gstack-approvals rule --finding <fingerprint> --head <commit> --reason '<why>'
+--words '<owner's exact words>' --by '<owner>'`. Then run finish again. It
+prints each `RULED_NOTE:`, and the PR body and receipt list every `Ruled
+note:` line ([ship-policy.md](ship-policy.md#ruled-notes)). A ruling at a head
+outside the range is listed as `not applied`, and a path edited after the
+fix-check still routes by the post-review rules. When the owner wants the
+findings fixed instead, fix them and ask for a grant for one more fix-check.
+
 <a id="review-loop-exception-invalid"></a>
 ### `REVIEW_LOOP_EXCEPTION_INVALID`
 
@@ -6747,12 +6948,13 @@ took `SAVE_VERSION := 83` under the branch's `:= 84`). The merge may have splice
 changed one key and the base the next, so the receipt does not carry silently.
 The refusal names the paths and a packet file with the hunks that differ and
 the base's own change. The same lines moved somewhere else are
-`RECEIPT_CARRY_PRODUCT_CHANGED`, not this code. A packet section over 200
-lines takes the full loop instead, but only the branch's own lines count toward
-that limit: the base's +/- lines, already merged at base, are shown and not
-counted (GST-1226), so a large base edit next to the branch's hunk still gets
-the scoped read. A base change over 2,000 lines in one file counts in full
-again and takes the full loop.
+`RECEIPT_CARRY_PRODUCT_CHANGED`, not this code. A packet section with over
+200 of the branch's own +/- lines takes the full loop instead. Nothing else
+counts toward that limit: the context lines and headers of the branch's hunks,
+which a base merge can move (GST-2229), and the base's own change, already
+merged at base (GST-1226), are shown and not counted, so a large base edit next
+to the branch's hunks still gets the scoped read. A base change over 2,000 lines
+in one file counts in full again and takes the full loop.
 
 **Fix.** Dispatch one fix-check reviewer
 ([review-policy.md](review-policy.md)) on the packet. When it comes back clean,
@@ -6786,7 +6988,7 @@ range_diff_lines=N range_diff_sha256=<sha> packet=<file>`: one reader on that
 range-diff can clear it instead of a full second /ship. A rebased branch
 (`RECEIPT_CARRY_TREE_MISMATCH`), a retargeted stack, a receipt with no
 `review_depth`, more than 20 changed product paths, a binary path, a moved
-base context section over 200 lines, an empty or unreadable range-diff and a
+base context section with over 200 of the branch's own +/- lines, an empty or unreadable range-diff and a
 packet over 400 lines or 64 KB print `RECHECK: not eligible (<why>)` instead.
 When base context also moved next to reviewed hunks in other paths, their
 scoped-review sections join the same packet (GST-1561): the caps count the

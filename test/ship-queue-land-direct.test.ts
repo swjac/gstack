@@ -27,9 +27,11 @@ import { readTrainNotes } from '../crew/scripts/release-cut';
 import { gitIn } from '../crew/scripts/train-gate';
 import type { GhRunner } from '../crew/scripts/recover-receipts';
 import { TRAIN_BLOCK } from './helpers/ship-queue-train-fixture';
+import { CHECK_IDS } from '../lib/pregate/index';
 
 const REQUIRED = ['free-tests', 'Check VERSION is not stale vs queue'];
 const POLICY = { ...BASE_POLICY, release_tool: null, release_outputs: [], changelog_fragments: { dir: 'changelog.d', required_checks: REQUIRED }, merge: 'direct', min_gstack_version: MERGE_KEY_VERSION };
+const FULL_CHECKS = CHECK_IDS.map(id => ({ id, status: 'pass' }));
 /** The base policy with land.merged_checks: the first proves the checks see the merged tree, the second stands in for a budget cap a stale base can break (#3886). */
 const CHECKED = { ...POLICY, land: { merged_checks: ['test -e other.txt && ls pr-*.txt >/dev/null', "test ! -e budget.md || test ! -e other.txt || { echo 'budget.md over its cap' >&2; exit 1; }"] }, min_gstack_version: LAND_KEY_VERSION };
 const repos: FixtureRepo[] = [];
@@ -54,10 +56,12 @@ function setup(policy: Record<string, unknown> = POLICY): Fx {
     "  if(d.mainOnView){g('update-ref','refs/heads/main',d.mainOnView);delete d.mainOnView;save()}",
     "  let head='';try{head=g('rev-parse','refs/heads/'+p.headRefName)}catch{};",
     "  console.log(JSON.stringify({mergeable:'MERGEABLE',mergeStateStatus:'CLEAN',...p,headRefOid:p.headRefOid??head,mergeCommit:p.mergeSha?{oid:p.mergeSha}:null}));process.exit(0)}",
+    "if(a[0]==='api'&&/actions\\/runs\\?head_sha=/.test(a[1])){console.log(JSON.stringify({total_count:0,workflow_runs:[]}));process.exit(0)}",
     "if(a[0]==='api'){const m=/commits\\/([0-9a-f]+)\\/(check-runs|status)/.exec(a[1]);if(!m)process.exit(1);",
     "  if(m[2]==='status'){console.log(JSON.stringify({total_count:0,statuses:[]}));process.exit(0)}",
     "  const set=d.checks[m[1]]??Object.fromEntries(d.defaultChecks.map(n=>[n,'success']));",
-    "  const runs=Object.entries(set).map(([name,c],i)=>({id:i+1,name,status:c==='pending'?'in_progress':'completed',conclusion:c==='pending'?null:c,completed_at:'2026-11-03T00:00:00Z',app:{id:1}}));",
+    "  const all=/[?&]filter=all(&|$)/.test(a[1]);",
+    "  const runs=Array.isArray(set)?set.filter(r=>all||!r.earlier_attempt):Object.entries(set).filter(([,v])=>all||!v.earlierAttempt).map(([name,v],i)=>{const c=typeof v==='string'?v:v.conclusion;return {id:i+1,name,status:c==='pending'?'in_progress':'completed',conclusion:c==='pending'?null:c,completed_at:'2026-11-03T00:00:00Z',app:{id:1}}});",
     "  console.log(JSON.stringify({total_count:runs.length,check_runs:runs}));process.exit(0)}",
     "if(a[0]==='pr'&&a[1]==='merge'){const p=d.prs[a[2]];const want=a[a.indexOf('--match-head-commit')+1];const head=g('rev-parse','refs/heads/'+p.headRefName);",
     "  if(head!==want){console.error('Head branch was modified');process.exit(1)}",
@@ -475,6 +479,61 @@ describe('land --pin: direct merge at the PR\'s own green head', () => {
   }, 90_000);
 });
 
+describe('land --pin and ready under merge: direct (GSTA-461 items 7 and 19)', () => {
+  const run = (id: number, name: string, conclusion: string, completed_at: string, suite: number) => ({ id, name, status: 'completed', conclusion, completed_at, app: { id: 1 }, check_suite: { id: suite } });
+
+  // Value: protects=land --pin names each red run that a newer run from another check suite replaced, right after its CI line, and still lands;
+  // fails_when=land prints plain green and merges with no word when free-tests failed in suite 1 and a branch-only run passed in suite 3;
+  // why_new=reports/GSTA-461.md item 7; seam=the gh shim's raw check-run list; no_claim=the same-suite rule that would refuse (after the freeze)
+  test('a red check replaced by a pass from another check suite lands with a CI_SUPERSEDED line', () => {
+    const fx = setup();
+    const pin = openPr(fx, '9');
+    fx.write(d => { d.checks[pin] = [run(1, 'free-tests', 'failure', '2026-11-09T10:00:00Z', 1), run(2, 'Check VERSION is not stale vs queue', 'success', '2026-11-09T10:02:00Z', 2), run(3, 'free-tests', 'success', '2026-11-09T10:20:00Z', 3)]; });
+    const r = land(fx, '9', pin);
+    expect(r.err).toBe('');
+    expect(r.status).toBe(EXIT.ok);
+    const lines = r.out.split('\n');
+    const ci = lines.findIndex(l => l.startsWith('CI: green at '));
+    expect(ci).toBeGreaterThanOrEqual(0);
+    expect(lines[ci + 1]).toBe('CI_SUPERSEDED: free-tests red run 1 replaced by 3 (suite 1 → 3)');
+    expect(r.out).toContain('MERGED: #9 as ');
+  }, 90_000);
+
+  // Value: protects=ready without a train block refuses when origin never receives its READY note, and a rerun after the fix pushes the kept note
+  // that land --pin then reads from origin; fails_when=ready prints a READY_RECEIPT line and exits 0 while origin lacks the note (our own land on
+  // 11-09 refused QUEUE_NOT_READY this way); why_new=#4254 covers only the train path; seam=a pre-receive hook in the fixture's bare origin, and a
+  // separate state root for ready so land can only find the note on origin; no_claim=GitHub's own rejection messages
+  test('origin rejects refs/notes/*: ready refuses QUEUE_READY_NOTE_UNPUSHED; once origin accepts, a rerun pushes the note and land merges', () => {
+    const fx = setup();
+    const head = openPr(fx, '31', { ready: false });
+    fx.repo.git('checkout', '-q', 'pr-31');
+    const pregate = path.join(fx.repo.root, 'pregate.json');
+    fs.writeFileSync(pregate, JSON.stringify({ schema_version: 1, tree: runBin(fx.repo, 'gstack-wtree', []).out.trim(), head, verdict: 'pass', checks: FULL_CHECKS }));
+    const env = { ...fx.env, GSTACK_STATE_ROOT: path.join(fx.repo.root, 'ready-state') };
+    const ready = () => runBin(fx.repo, 'gstack-ship-queue', ['ready', '--pr', '31', '--pregate', pregate, '--base', 'main'], env);
+    const hook = path.join(fx.repo.origin, 'hooks', 'pre-receive');
+    const remoteNotes = () => fx.repo.git('ls-remote', 'origin', 'refs/notes/gstack-trains').split(/\s+/)[0] ?? '';
+    fs.writeFileSync(hook, '#!/bin/sh\nwhile read old new ref; do case "$ref" in refs/notes/*) echo "notes refused by fixture" >&2; exit 1;; esac; done; exit 0\n', { mode: 0o755 });
+    const refused = ready();
+    expect(refused.status).toBe(EXIT.refused);
+    expect(refused.err).toContain('(QUEUE_READY_NOTE_UNPUSHED)');
+    expect(refused.err).toContain('gstack-ship-queue ready --pr 31');
+    expect(refused.out).not.toContain('notes pushed');
+    expect(refused.out).toMatch(/^GSTACK_RESULT: .*status=refused/m);
+    expect(remoteNotes()).toBe('');
+    fs.rmSync(hook);
+    const again = ready();
+    expect(again.err).toBe('');
+    expect(again.status).toBe(EXIT.ok);
+    expect(again.out).toMatch(/^READY_RECEIPT: .* \(notes pushed to origin refs\/notes\/gstack-trains\)$/m);
+    expect(remoteNotes()).not.toBe('');
+    fx.repo.git('checkout', '-q', '--detach', 'origin/main');
+    const r = land(fx, '31', head);
+    expect(r.status).toBe(EXIT.ok);
+    expect(r.out).toContain('MERGED: #31 as ');
+  }, 120_000);
+});
+
 describe('land --pin: refusals (nothing merged)', () => {
   const refused = (fx: Fx, r: { status: number | null; err: string }, code: string) => {
     expect(r.status).not.toBe(EXIT.ok);
@@ -526,6 +585,35 @@ describe('land --pin: refusals (nothing merged)', () => {
     const fx = setup();
     const pin = openPr(fx, '15', { shipped: false });
     refused(fx, land(fx, '15', pin), 'QUEUE_RECEIPT_MISSING');
+  }, 90_000);
+
+  test('QUEUE_RECEIPT_BASE_MISMATCH: a #3570 child retargeted to main while its parent is open lands nothing; a GST-1199 child reviewed against main still lands', () => {
+    const fx = setup();
+    const { repo } = fx;
+    openPr(fx, '17');
+    const child = (pr: string, base: string): string => {
+      repo.git('checkout', '-q', 'origin/pr-17', '-B', 'pr-' + pr);
+      fs.writeFileSync(path.join(repo.work, 'pr-' + pr + '.txt'), pr + '\n');
+      fs.writeFileSync(path.join(repo.work, 'changelog.d', 'pr-' + pr + '.md'), '- #' + pr + ' change\n');
+      repo.git('add', '-A');
+      repo.git('commit', '-q', '-m', 'pr ' + pr);
+      repo.git('push', '-q', '-f', 'origin', 'HEAD:refs/heads/pr-' + pr);
+      const head = repo.git('rev-parse', 'HEAD');
+      fx.write(d => { d.prs[pr] = { state: 'OPEN', baseRefName: 'main', headRefName: 'pr-' + pr, isCrossRepository: false, title: 'PR ' + pr, body: shippedBody(pr, head, { base }) }; });
+      markReady(fx, pr, head);
+      repo.git('checkout', '-q', '--detach', 'origin/main');
+      return head;
+    };
+    const before = remote(fx, 'main');
+    const retargeted = child('171', 'pr-17');
+    const r = land(fx, '171', retargeted);
+    refused(fx, r, 'QUEUE_RECEIPT_BASE_MISMATCH');
+    expect(r.err).toContain("PR #171's ship receipt was reviewed against pr-17, not main");
+    expect(remote(fx, 'main')).toBe(before);
+    const reviewedOnMain = child('172', 'origin/main');
+    const ok = land(fx, '172', reviewedOnMain);
+    expect(ok.err).toBe('');
+    expect(ok.status).toBe(EXIT.ok);
   }, 90_000);
 
   test('QUEUE_NOT_READY: no READY note at the pin', () => {
@@ -581,6 +669,18 @@ describe('land --pin: refusals (nothing merged)', () => {
     refused(fx, missing, 'QUEUE_LAND_CHECKS');
     expect(missing.err).toContain('Check VERSION is not stale vs queue');
     expect(missing.out + missing.err).toContain('cannot be dispatched, so edit the PR title or body to rerun it');
+  }, 90_000);
+
+  // Value: protects=land never merges a pin whose failed check run sits in an earlier workflow-run attempt that GitHub's default filter=latest hides
+  // (gstack-evals#303: the rerun attempt listed no jobs); fails_when=land reads only the latest attempt and merges; seam=ciAtHead through the shim's
+  // filter=latest/all split; no_claim=a workflow run that never created a job
+  test('QUEUE_LAND_CHECKS: a failed check from an earlier attempt whose rerun listed no jobs is red (gstack-evals#303)', () => {
+    const fx = setup();
+    const pin = openPr(fx, '27');
+    fx.write(d => { d.checks[pin] = { 'free-tests': 'success', 'Check VERSION is not stale vs queue': 'success', checks: { conclusion: 'failure', earlierAttempt: true } }; });
+    const r = land(fx, '27', pin);
+    refused(fx, r, 'QUEUE_LAND_CHECKS');
+    expect(r.err).toMatch(/red at [0-9a-f]{12} \(passed=2 failed=1 pending=0 skipped=0\)/);
   }, 90_000);
 
   test('QUEUE_LAND_NOT_CLEAN: GitHub does not report the PR mergeable and clean', () => {
