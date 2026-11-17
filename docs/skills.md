@@ -752,14 +752,14 @@ A lot of branches die when the interesting work is done and only the boring rele
 
 ### The PR body
 
-`/ship` writes the PR body from the diff, the receipt and the review, and a reader who was not in the session decides the merge from it. The front is for people and the end is for machines: the body opens with one or two plain sentences saying what changed for someone using the project and which README goal it serves, and it ends with one collapsed **Agent notes** section (`<!-- gstack:agent-notes -->` then `<details><summary>Agent notes</summary>`) that holds the ship receipt, the approval and Plan lines, issue codes and the review-loop lines gstack's tools read. The title follows the same shape: plain words first, an issue code only at the end (`Stop gstack from hitting GitHub's rate limit while it waits on PRs (GST-1713)`), checked by `gstack-plain-title` (see [Plain titles](ship-policy.md#plain-titles)). On Capy (`CAPY_PR: on`) the opening is followed by three sections, in this order, before the standard Summary, Test plan and Documentation sections:
+`/ship` writes the PR body from the diff, the receipt and the review, and a reader who was not in the session decides the merge from it. The front is for people and the end is for machines: the body opens with at most three plain lines (600 characters) saying what changed for someone using the project, why (the README goal it serves) and what the reader has to do, every other section sits under a `## ` heading that `gstack-post` folds into a collapsed section ([writing-prs.md](writing-prs.md)), and it ends with one collapsed **Agent notes** section (`<!-- gstack:agent-notes -->` then `<details><summary>Agent notes</summary>`) that holds the ship receipt, the approval and Plan lines, issue codes and the review-loop lines gstack's tools read. The title follows the same shape: plain words first, an issue code only at the end (`Stop gstack from hitting GitHub's rate limit while it waits on PRs (GST-1713)`), checked by `gstack-plain-title` (see [Plain titles](ship-policy.md#plain-titles)). On Capy (`CAPY_PR: on`) the opening is followed by three sections, in this order, before the standard sections (Documentation, Tests and the rest); `## What changed` holds the pictures, then the template's themes:
 
 1. **`## What changed`**: one to three captioned before/after images from `gstack-pr-shots` or a UI screenshot, highest-signal first, with a collapsed text version under each.
 2. **`## Why`**: two or three sentences. The first states the problem in the person's words (the issue, the message, the failing run), then the cause and the user-visible effect.
 3. **`## Blast radius`**: what else the change touches and the one fact that makes that safe, with the evidence-ladder rung that fact reached (a test that exercises the shared path, a grep over every caller, a measured run). A change to a shared helper, a generated file, a selection list or a policy default always has one; a leaf fix says so in one line.
 `## Approvals`, the output of `gstack-approvals render` verbatim, goes inside Agent notes. On a private repository that is the table; on a public repository, or one whose visibility gh cannot read, it is only `Approved: yes|no (record <id>)`, because GitHub keeps every earlier version of a PR description. The table shows each local path in Asked, Covers and Still pending as `…/<file name>`, so the home directory, user name and Drive folder in those paths stay out of the body; Exact words stays verbatim, and `gstack-approvals list` keeps the full path. For a private repository that may go public, `render --redacted` prints the public form, byte for byte; `--redacted` with `--full` is refused.
 
-Before the body is composed, `gstack-prose-lint` reads the Why, Summary and Blast radius drafts (`--sections 'Why,Summary,Blast radius' --gate`) and the CHANGELOG entry (`--base origin/<base> --gate`), and a `PROSE_LINT_FOUND` line names the sentence to rewrite; the rest of the body is advisory. The Captain's merge-ask template (`captain/templates/merge-ask.md`) carries the same sections, so a READY report and its PR say the same thing.
+Before the body is composed, `gstack-prose-lint` reads the Why, What changed and Blast radius drafts (`--sections 'Why,What changed,Blast radius' --gate`) and the CHANGELOG entry (`--base origin/<base> --gate`), and a `PROSE_LINT_FOUND` line names the sentence to rewrite; the rest of the body is advisory. The Captain's merge-ask template (`captain/templates/merge-ask.md`) carries the same sections, so a READY report and its PR say the same thing.
 
 ### Versions: where `/ship` looks, and when it ships without one
 
@@ -1029,6 +1029,9 @@ sets the defaults that keep it from coming back.
   thread keeps its PR until it merges or closes and checks in with its Captain once past 1B, and no thread holding an
   open PR rotates), a subagent past 100M (stop), empty wakes past 25% of the
   last 40 turns (warm-wait check-ins are left out), and review rounds past 2 per PR. Captains are reported, never rotated.
+  The `RUNAWAY:` line also prices the wakes it read: `cold_wakes` and `empty_wakes` are their shares by count,
+  `cold_extra_spend` the share of spend that cold model calls add over warm ones (a wake that starts after the
+  5-minute prompt cache lapsed, or a call after a tool that ran that long), and `empty_spend` the share the empty wakes cost. `scan --wakes` prints one `WAKE:` line per wake with its cost in warm model calls.
 - **Stop.** A live subagent past 100M is stopped with its reason. A standing thread is rotated at a clean point through
   a handoff file and a successor brief (`runaway-stopper/templates/`), then archived by its own Captain once none of
   its PRs is open (R91), through `gstack-archive-check thread`. A thread
@@ -1064,7 +1067,8 @@ and those with no TTL once they are 4 hours old, never another owner's; every ru
 ends with `UBICLOUD: left=0` or fails; the
 quota preflight refuses before the create request when the project's running
 VMs plus the new size exceed the known ceiling (`UBI_QUOTA_VCPUS`, or the
-maximum the last refusal printed; `UBI_QUOTA_WAIT` waits for room instead); a
+maximum the last refusal printed; `UBI_QUOTA_WAIT` waits for room instead, and
+`gstack-ubi room` prints how many more VMs fit so a fan-out can size each batch); a
 watchdog kills a remote command silent for `UBI_IDLE_TIMEOUT` seconds (1800)
 with exit 124 and its last 40 lines, and prints a heartbeat every
 `UBI_HEARTBEAT` seconds; and `gstack-ubi verify` runs the repository's
